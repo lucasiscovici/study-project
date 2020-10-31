@@ -1,0 +1,10 @@
+# This file contains values from Cookiecutter
+
+default_context:
+  project_name: "study-project"
+  project_description: "DataScience and ML MAnagement"
+  organization: "study-project"
+  license: "MIT"
+  version: "0.1.0"
+  github_name: "lucasiscovici"
+  email: "luluisco@yahoo.fr"
