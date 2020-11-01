@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 import os
 import sys
 import tempfile
@@ -21,7 +22,7 @@ class Utils:
         def md5(string):
             import hashlib
 
-            return hashlib.md5(string.encode()).hexdigest()
+            return hashlib.md5(string.encode()).hexdigest()  # nosec
 
     class Df:
         @staticmethod
@@ -609,7 +610,7 @@ class StudyProject:
         print(df + ": ok")
         StudyProjectEnv.saveProject(self.proj[id])
 
-    def getOrCreateStudy(id, setUp=None, data=None):
+    def getOrCreateStudy(self, id, setUp=None, data=None):
         if id in self.studies:
             print(f"Study '{id}' : loaded")
             return self.studies[id]
