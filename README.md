@@ -18,11 +18,27 @@ DataScience and ML MAnagement
 # CLI
 
 ```bash
-curl -L -s https://tinyurl.com/study-project-init | sh my-project
+curl -L -s https://tinyurl.com/study-project-init | sh -s my-project
 #with alias
-alias study-project-init="curl -L -s https://tinyurl.com/study-project-init | sh "
+alias study-project-init="curl -L -s https://tinyurl.com/study-project-init | sh -s "
 study-project-init my-project
 ``` 
+This command will **init**:
+- add directory my-project
+- check if image 'studyproject/scipy-notebook' is up-to-date
+	- pull if not
+- run container in port from 8888 to 8898 (check witch port is open)
+
+```bash
+study-project-init my-project --open 
+```
+
+This command will 
+	- **init** if need
+	- open the jupyter notebook in your browser
+	- the token is : study-project
+
+
 
 ## 🛡 License
 
