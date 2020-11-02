@@ -9,6 +9,7 @@ import typer
 from rich.console import Console
 from study_project import __version__
 from study_project.example import hello
+from study_project.study_project import StudyProjectEnv
 
 
 class Color(str, Enum):
@@ -22,7 +23,7 @@ class Color(str, Enum):
 
 app = typer.Typer(
     name="study-project",
-    help="DataScience and ML MAnagement",
+    help="DataScience and ML Management",
     add_completion=False,
 )
 console = Console()
@@ -35,6 +36,11 @@ def version_callback(value: bool):
             f"[yellow]study-project[/] version: [bold blue]{__version__}[/]"
         )
         raise typer.Exit()
+
+
+@app.command()
+def init():
+    StudyProjectEnv.check_all_installed()
 
 
 @app.command(name="")
