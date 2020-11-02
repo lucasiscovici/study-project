@@ -39,12 +39,7 @@ def version_callback(value: bool):
 
 
 @app.command()
-def init(
-    data_path: str = StudyProjectEnv.data_path,
-    project_path: str = StudyProjectEnv.project_path,
-):
-    StudyProjectEnv.data_path = data_path
-    StudyProjectEnv.project_path = project_path
+def init():
     StudyProjectEnv.check_all_installed()
 
 

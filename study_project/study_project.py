@@ -94,9 +94,6 @@ class Utils:
             import shlex
             import subprocess
 
-            if commandString.strip()[:3] == "git":
-                commandString = Git.process_command(commandString)
-
             process = subprocess.Popen(
                 shlex.split(commandString) if not shell else commandString,
                 stdout=subprocess.PIPE,
@@ -197,14 +194,12 @@ class Git:
 
     @staticmethod
     def check_installed():
-        return Git.installed or os.path.isdir(
-            StudyProjectEnv.project_path + "/.git"
-        )
+        return Git.installed or os.path.isdir(os.getcwd() + "/.git")
 
     @staticmethod
     def install(add=True, commit=True, message="git installed"):
         print("\tset up Git...")
-        g = git.cmd.Git(StudyProjectEnv.project_path)
+        g = git.cmd.Git(os.getcwd())
         g.init()
         Utils.Shell.command("touch .gitignore")
         if add:
@@ -216,7 +211,7 @@ class Git:
 
     @staticmethod
     def addTag(name, desc):
-        g = git.cmd.Git(StudyProjectEnv.project_path)
+        g = git.cmd.Git(os.getcwd())
         g.tag(["-a", f"'{name}'", "-m", f"'{desc}'"])
 
     @staticmethod
@@ -247,10 +242,10 @@ class Git:
         if Git.checkBranch(name):
             return
         if checkout:
-            g = git.cmd.Git(StudyProjectEnv.project_path)
+            g = git.cmd.Git(os.getcwd())
             g.checkout(["-b", f"{name}"])
         else:
-            g = git.cmd.Git(StudyProjectEnv.project_path)
+            g = git.cmd.Git(os.getcwd())
             g.branch([f"{name}"])
 
     @staticmethod
@@ -301,7 +296,7 @@ class Git:
             # if rep.output:
             #   print(rep.output,rep.commandString)
             return
-        g = git.cmd.Git(StudyProjectEnv.project_path)
+        g = git.cmd.Git(os.getcwd())
         g.commit([author, "-m", f"'{message}'"])
 
     @staticmethod
@@ -319,12 +314,12 @@ class Git:
             # if rep.output:
             #   print(rep.output, rep.commandString)
             return
-        g = git.cmd.Git(StudyProjectEnv.project_path)
+        g = git.cmd.Git(os.getcwd())
         g.merge([Utils.ifelse(no_ff, "--no-ff"), branch])
 
     @staticmethod
     def add(listToAdd):
-        g = git.cmd.Git(StudyProjectEnv.project_path)
+        g = git.cmd.Git(os.getcwd())
         g.add([] + listToAdd)
 
     @staticmethod
@@ -343,14 +338,6 @@ class Git:
             f"git config {Utils.ifelse(globally,'--global')} {Utils.ifelse(v is None and not remove,'--get')} {Utils.ifelse(remove,'--unset')} {k} {Utils.ifelse(v is not None, v)}"
         )
 
-    @staticmethod
-    def process_command(cmd):
-        return (
-            cmd
-            if StudyProjectEnv.project_path == os.getcwd()
-            else f"cd '{StudyProjectEnv.project_path}' && {cmd}"
-        )
-
 
 class Dvc:
     installed = False
@@ -358,9 +345,7 @@ class Dvc:
 
     @staticmethod
     def check_installed():
-        return Dvc.installed or os.path.isdir(
-            StudyProjectEnv.project_path + "/.dvc"
-        )
+        return Dvc.installed or os.path.isdir(os.getcwd() + "/.dvc")
 
     @staticmethod
     def install():
@@ -434,7 +419,6 @@ class StudyProjectEnv:
     default_branch = "study_project_set_up"
     data_path = "data"
     project_prefixe = "project"
-    project_path = os.getcwd()
 
     @staticmethod
     def add():
@@ -443,7 +427,7 @@ class StudyProjectEnv:
     @staticmethod
     def check_installed():
         return StudyProjectEnv.installed or os.path.isdir(
-            StudyProjectEnv.project_path + "/" + StudyProjectEnv.path
+            os.getcwd() + "/" + StudyProjectEnv.path
         )
 
     @staticmethod
