@@ -97,8 +97,8 @@ class Utils:
             process = subprocess.Popen(
                 shlex.split(commandString) if not shell else commandString,
                 stdout=subprocess.PIPE,
-                shell=shell,
-            )  # nosec
+                shell=shell,  # nosec
+            )
             output, error = process.communicate()
             return Struct(
                 **{
@@ -230,8 +230,8 @@ class Git:
     @staticmethod
     def checkBranch(name):
         rep = Utils.Shell.command(
-            f"git branch  --list '{name}' | tr -d ' '", shell=True
-        )  # nosec
+            f"git branch  --list '{name}' | tr -d ' '", shell=True  # nosec
+        )
         if rep.error:
             raise Exception(rep)
         branch = rep.output
