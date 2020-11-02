@@ -1,0 +1,371 @@
+#!/bin/bash
+#init
+	
+function try()
+{
+    [[ $- = *e* ]]; SAVED_OPT_E=$?
+    set +e
+}
+
+function throw()
+{
+    exit $1
+}
+
+function catch()
+{
+    export ex_code=$?
+    (( $SAVED_OPT_E )) && set +e
+    return $ex_code
+}
+
+function throwErrors()
+{
+    set -e
+}
+
+function ignoreErrors()
+{
+    set +e
+}
+
+repeatstr(){
+	# $1=number of patterns to repeat
+	# $2=pattern
+	printf -v "TEMP" '%*s' "$1"
+	echo ${TEMP// /$2}
+}
+
+check_im_exist(){
+	docker image inspect "$1" >/dev/null 2>&1
+	return $?
+}
+
+install_im(){
+	tab=${2:-0}
+	tabS=$(repeatstr "$tab" "\t")
+	echo "${tabS}pulling... '$1'"
+	docker pull "$1" >/dev/null 2>&1
+}
+
+image_up_to_date(){
+	ref="${1:-library/ubuntu:latest}"
+	if ! grep -q "/" <<<"$ref"; then
+		ref="library/$ref"
+	fi
+	if ! grep -q ":" <<<"$ref"; then
+		ref="${ref}:latest"
+	fi
+	repo="${ref%:*}"
+	tag="${ref##*:}"
+	tag="${tag:-latest}"
+
+
+	if ! check_im_exist "$ref"; then
+		install_im "$ref" 1	
+		echo "\timage '${ref}' is up-to-date"
+		exit 0
+	fi
+
+	acceptM="application/vnd.docker.distribution.manifest.v2+json"
+	acceptML="application/vnd.docker.distribution.manifest.list.v2+json"
+	token=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" \
+	        | sed -e 's/[{}]/''/g' | awk -v RS=',"' -F: '/^"token"/ {print $2}' | tr -d '"')
+
+	rep=$(curl -H "Accept: ${acceptM}" \
+	     -H "Accept: ${acceptML}" \
+	     -H "Authorization: Bearer $token" \
+	     -I -s "https://registry-1.docker.io/v2/${repo}/manifests/${tag}"  | grep "Docker-Content-Digest" | sed "s/Docker-Content-Digest: //" | sed -nE "s/^.+:(.+)$/\1/p" | tr -d '\n' | tr -d '\r') 
+
+
+	repoDigest=$(docker image inspect "${ref}" --format '{{index .RepoDigests 0}}' | sed -E "s/.+:(.+)$/\1/" | tr -d '\n' | tr -d '\r' )
+
+	if [[ "${rep}" != "${repoDigest}" ]]; then
+		install_im "$ref"	
+		# exit 0
+	fi
+
+	echo "\timage '${ref}' is up-to-date"
+
+}
+
+check_docker_container(){
+	container="${1}"
+	lignes=$(docker ps -a --filter "name=^${container}$" | wc -l | tr -d ' ')
+	[[ "$lignes" == "1" ]]
+	return $?
+}
+
+findPort(){
+	p=${2}
+	np=${1}
+	while nc -z "0.0.0.0" "$np" &>/dev/null && [ $np -le $p ] ; do
+    	np=$((np+1))
+    done
+    if [[ $np -eq $p ]];then
+    	return 1
+    else
+    	echo "${np}"
+    	return 0
+    fi
+}
+
+stop_docker_container(){
+	docker stop "$1"  &>/dev/null
+}
+
+remove_dir(){
+	if [[ -d "$1" ]]; then
+		d=$(du -s "$1" | tr '\t' ' ' | cut -d ' ' -f1)
+		if [[ "$d" != "0" ]]; then
+			read "STOREDVAR?The directory '$1' is not empty, are your sure to remove it ? (y/N) "
+			if [[ "$STOREDVAR" = "y" ]]; then
+				rm -rf "$1"
+				echo "'$1' directory removed"
+			fi
+		fi
+	fi
+}
+# Report usage
+usage() {
+  echo "Usage:"
+  echo "$(basename $0) [-d/--dirname NAME -h/--help -p/--port '8888' -pm/--port-max '8898' -h/--host '0.0.0.0'\
+  					    -w/--workdir 'work' -i/--image 'studyproject/[scipy-notebook,datascience-notebook]'] [--] NAME"
+
+  # Optionally exit with a status code
+  if [ -n "$1" ]; then
+    exit "$1"
+  fi
+}
+
+invalid() {
+  echo "ERROR: Unrecognized argument: $1" >&2
+  usage 1
+}
+
+open_in_browser(){
+	xdg-open "$1" &> /dev/null 
+	if ! xdg-open "$1" &> /dev/null;then 
+		if ! open "$1" &> /dev/null; then
+			start "$1" &> /dev/null
+		fi
+	fi
+	exit
+}
+
+parse_json_end(){
+	stringVar="$1"
+	open=$((0))
+	for ((i=1;i<=${#stringVar};i++)); do
+  		var="${stringVar:$i-1:1}"
+  		if [[ "$var" = "{" ]]; then
+  			#statements
+  			open=$((open + 1))
+  		elif [[ "$var" = "[" ]]; then
+  			#statements
+  			open=$((open + 1))
+  		elif [[ "$var" = "]" ]]; then
+  			#statements
+  			open=$((open - 1))
+  		elif [[ "$var" = "}" ]]; then
+  			#statements
+  			open=$((open - 1))
+  		fi
+
+  		if [[ ("$open" = "0" || $open -eq 0)  && "$i" == "1" ]]; then
+  			echo ${stringVar}
+  			return 0;
+  		fi
+  		if [[ "$open" = "0" || $open -eq 0 ]]; then
+  			echo ${stringVar:0:$i}
+  			return 0;
+  		fi
+	done
+
+	return 1
+}
+
+getvaluejson(){
+	cut -d',' -f1 <<<"$1" |  cut -d'}' -f1 |  cut -d']' -f1  
+}
+
+getlittle(){
+	if [[ -z  "$2" ]]; then
+		return
+	fi
+	textToKeep="$1"
+	text="$2"
+	a=$(echo "$text" | sed -E "s|.*${textToKeep}:(.+)|\1|")
+	parse_json_end "$a"
+
+}
+
+find_container_addr(){
+
+	a=$(docker inspect "$1" --format '{{json .NetworkSettings.Ports}}' 2>/dev/null  | tr -d '"' | sed -E "s/^.(.*).$/\1/")
+	a=$(getlittle "$PORT_NB/tcp" "$a")
+	if [[ "$a" = "null" ]]; then
+		return 0
+	fi
+	b=$(getlittle 'HostIp' "$a")
+	hostIp=$(getvaluejson "$b")
+	c=$(getlittle 'HostPort' "$a")
+	hostPort=$(getvaluejson "$c")
+
+	echo "http://$hostIp:$hostPort"
+
+}
+
+
+# Pre-process options to:
+# - expand -xyz into -x -y -z
+# - expand --longopt=arg into --longopt arg
+ARGV=()
+END_OF_OPT=
+while [[ $# -gt 0 ]]; do
+  arg="$1"; shift
+  case "${END_OF_OPT}${arg}" in
+    --) ARGV+=("$arg"); END_OF_OPT=1 ;;
+    --*=*) ARGV+=("${arg%%=*}" "${arg#*=}") ;;
+    --*) ARGV+=("$arg") ;;
+    -*) for i in $(seq 2 ${#arg}); do cc=${arg:$i-1:1};ARGV+=("-${cc}"); done ;;
+    *) ARGV+=("$arg") ;;
+  esac
+done
+
+# # Apply pre-processed options
+set -- "${ARGV[@]}"
+
+# Parse options
+END_OF_OPT=
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+  case "${END_OF_OPT}${1}" in
+    -h|--help)      usage 0 ;;
+#     -p|--password)  shift; PASSWORD="$1" ;;
+#     -u|--username)  shift; USERNAME="$1" ;;
+	--pm|--port-max)      shift; PORT_MAX="$1" ;;
+	--p|-p|--port)      shift; PORT="$1" ;;
+	-h|--host)      shift; HOST="$1" ;;
+	--pn|--port-nb)      shift; PORT_NB="$1" ;;
+	-w|--workdir)   shift; WORKDIR="$1" ;;
+	--im|--image)   shift; IMAGE="$1" ;;
+	-t|--token)   shift; TOKEN="$1" ;;
+	-d|--dirname)   shift; DIRNAME="$1" ;;
+	-r|--recreate)    RECREATE="1" ;;
+	--rm|--remove)    REMOVE="1" ;;
+	--open)    OPEN="1" ;;
+#     -q|--quiet)     QUIET=1 ;;
+#     -C|--copy)      COPY=1 ;;
+#     -N|--notify)    NOTIFY=1 ;;
+#     --stdin)        READ_STDIN=1 ;;
+    --)             END_OF_OPT=1 ;;
+    -*)             invalid "$1" ;;
+    *)              POSITIONAL+=("$1") ;;
+  esac
+  shift
+done
+
+# # Restore positional parameters
+set -- "${POSITIONAL[@]}"
+
+if [[ $# -ne 1 ]]; then
+	echo "name must be specified"
+	exit 1
+fi
+
+NAME="$1"
+
+if [[ -z "$NAME" ]]; then
+	echo "name must be specified"
+	exit 1
+fi
+PORT_NB=${PORT_NB:-8888}
+DIRNAME="${DIRNAME:-$NAME}"
+IMAGE="${IMAGE:-studyproject/scipy-notebook}"
+
+# add studyProject library 
+###################################
+
+###################################
+REMOVE="${REMOVE:-0}"
+if [[ "$REMOVE" = "1" ]]; then
+	remove_dir "$DIRNAME"
+	echo "'$NAME' container stopping..."
+	stop_docker_container "$NAME"
+	exit 0
+fi
+PORT="${PORT:-8888}"
+PORT_MAX=${PORT_MAX:-8898}
+HOST="${HOST:-0.0.0.0}"
+WORKDIR="${WORKDIR:-${PWD}/${DIRNAME}/work}"
+
+TOKEN="${TOKEN:-study-project}"
+
+RECREATE="${RECREATE:-0}"
+
+OPEN="${OPEN:-0}"
+
+
+if [[ "$OPEN" = "1" ]]; then
+	if ! check_docker_container "$NAME"; then
+		if [[ "$RECREATE" = "0" ]]; then
+			portContainer=$(find_container_addr "$NAME")
+			if [[ -z "$portContainer" ]]; then
+				echo "PORT du container '$NAME' not found"
+				exit 1
+			fi
+			open_in_browser  "$portContainer"
+		fi
+	fi
+fi
+
+if [[ -d "$WORKDIR" ]]; then
+	echo "directory already exist : '$WORKDIR'"
+else
+	echo "create directory : '$WORKDIR'"
+	mkdir -p "$WORKDIR"
+fi
+
+# TODO function description
+# @param	TODO The first parameter
+# @return
+
+# echo "study-project : create structure\n\twork/ : source code"
+# mkdir -p work
+
+echo "check if image '$IMAGE' is up-to-date"
+image_up_to_date "$IMAGE"
+
+#check volume path absolute
+#check docker container
+if ! check_docker_container "$NAME"; then
+	echo "'${NAME}' container already exist"
+	if [[ "$RECREATE" = "1" ]]; then
+		echo "stop container '${NAME}' ..."
+		stop_docker_container "$NAME"
+	else
+		if [[ "$OPEN" = "1" ]]; then
+			portContainer=$(find_container_addr "$NAME")
+			if [[ -z "$portContainer" ]]; then
+				echo "PORT du container '$NAME' not found"
+				exit 1
+			fi
+			open_in_browser  "$portContainer"
+		fi
+		exit 1
+	fi
+fi
+
+#check port open
+a=$(findPort "$PORT" "$PORT_MAX")
+
+if [[ -z "$a" ]]; then
+	echo "pas de port"
+else
+	echo "port : $a"
+	PORT="$a"
+fi
+
+docker run --name "$NAME" --rm -d -p "$PORT":"$PORT_NB" -v  "$WORKDIR:/home/jovyan/work" "$IMAGE" start-notebook.sh --NotebookApp.token="$TOKEN" &> /dev/null
+echo "Docker container started : '$NAME'"
