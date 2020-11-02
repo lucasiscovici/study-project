@@ -81,6 +81,8 @@ class Utils:
             import re
 
             dico = {}
+            if len(text) == 0:
+                return dico
             for i in text.split("\n"):
                 m = re.findall(f"^([^{sep}]+){sep}(.+)$", i)
                 dico[m[0][0].strip()] = m[0][1].strip()
@@ -100,8 +102,10 @@ class Utils:
             output, error = process.communicate()
             return Struct(
                 **{
-                    "output": output,
-                    "error": error,
+                    "output": output.decode("utf-8"),
+                    "error": output.decode("utf-8")
+                    if (output and "error" in output.decode("utf-8").lower())
+                    else error,
                     "commandString": commandString,
                 }
             )
@@ -215,7 +219,7 @@ class Git:
         rep = Utils.Shell.command(f"git branch --show-current")
         if rep.error:
             raise Exception(rep)
-        return rep.output.strip().decode("utf-8")
+        return rep.output.strip()
 
     @staticmethod
     def deleteBranch(name, force=False):
@@ -414,6 +418,7 @@ class StudyProjectEnv:
     prefixe = "study_project : "
     default_branch = "study_project_set_up"
     data_path = "data"
+    project_prefixe = "project"
 
     @staticmethod
     def add():
@@ -456,6 +461,52 @@ class StudyProjectEnv:
         Git.addBranch(brName)
         StudyProjectEnv.step += 1
         return brName
+
+    @staticmethod
+    def getVersions(id):
+        projPath = StudyProjectEnv.getProjPath(id)
+        if not Utils.File.exist(projPath + "/versions"):
+            return ""
+        versions = Utils.File.read(projPath + "/versions")
+        return versions
+
+    @staticmethod
+    def getVersion(id, hash):
+        versionsDict = StudyProjectEnv.getVersionsDict(id)
+        return versionsDict[hash]
+
+    @staticmethod
+    def saveVersions(id, versions):
+        projPath = StudyProjectEnv.getProjPath(id)
+        Utils.File.write(versions, filename=projPath + "/versions")
+        return versions
+
+    @staticmethod
+    def getVersionsDict(id):
+        versions = Utils.String.parse(StudyProjectEnv.getVersions(id))
+        return versions
+
+    @staticmethod
+    def getVersionNumber(id):
+        brName = Git.toBrancheName(id)
+        versions = StudyProjectEnv.getVersionsDict(id)
+        return len(versions)
+
+    @staticmethod
+    def addVersion(v, hash, id):
+        versions = StudyProjectEnv.getVersions(id)
+        StudyProjectEnv.saveVersions(
+            id, f"{versions}\n{hash}: {v}\n{v}: {hash}"
+        )
+
+    @staticmethod
+    def addProjectBranch(id):
+        nb = StudyProjectEnv.getVersionNumber(id)
+        brName = (
+            f"{StudyProjectEnv.project_prefixe}-{Git.toBrancheName(id)}-v{nb}"
+        )
+        Git.addBranch(brName)
+        return (brName, nb)
 
     @staticmethod
     def check_all_installed():
@@ -592,12 +643,26 @@ class StudyProjectEnv:
         pass
 
     @staticmethod
-    def saveProject(project):
-        projPath = (
-            StudyProjectEnv.path
-            + "/projects/"
-            + Git.toBrancheName(project.id, sep="_")
+    def getProjPath(id):
+        return (
+            StudyProjectEnv.path + "/projects/" + Git.toBrancheName(id, sep="_")
         )
+
+    @staticmethod
+    def saveProject(project):
+        def addCommit():
+            StudyProjectEnv.add()
+            StudyProjectEnv.commit(f"save Project '{project.id}'")
+
+        def upVersion(dataHash, setUpMd5Proj):
+            StudyProjectEnv.addVersion(
+                project.v,
+                Utils.Hash.md5(f"{dataHash}\n{setUpMd5Proj}"),
+                project.id,
+            )
+
+        projPath = StudyProjectEnv.getProjPath(project.id)
+
         if not Utils.Dir.exist(projPath):
             Utils.Dir.mk(projPath)
 
@@ -629,13 +694,13 @@ class StudyProjectEnv:
         if Utils.File.exist(f"{projPath}/setUp"):
             setUpMd5 = Utils.File.read(f"{projPath}/setUp")
             if setUpMd5Proj == setUpMd5:
+                upVersion(lastDataHashStr, setUpMd5Proj)
                 return
-        Utils.File.write(
-            Utils.Hash.function_md5(project.setUp), filename=f"{projPath}/setUp"
-        )
+        Utils.File.write(setUpMd5Proj, filename=f"{projPath}/setUp")
 
-        StudyProjectEnv.add()
-        StudyProjectEnv.commit(f"save Project '{project.id}'")
+        upVersion(lastDataHashStr, setUpMd5Proj)
+
+        addCommit()
 
         # studiesHash=[study.get_hash() for study in project.studies.values()]
         # Utils.File.write("\n".join(dataHash),filename=f"{projPath}/studies")
@@ -645,11 +710,23 @@ class StudyProjectEnv:
 
     @staticmethod
     def getProject(id, setUp):
-        projPath = (
-            StudyProjectEnv.path + "/projects/" + Git.toBrancheName(id, sep="_")
-        )
+        projPath = StudyProjectEnv.getProjPath(id)
+
+        projStr = ""
         if Utils.Dir.exist(projPath):
             proj = StudyProject(id)
+
+            if Utils.File.exist(f"{projPath}/setUp"):
+                setUpMd5Proj = Utils.Hash.function_md5(setUp)
+                setUpMd5 = Utils.File.read(f"{projPath}/setUp")
+                if setUpMd5Proj == setUpMd5:
+                    proj.setUp = setUp
+                else:
+                    proj.setUp = "outdated"
+                    print("SetUp is not the saved")
+                    return proj
+                # projStr+="\n"+setUpMd5
+
             if Utils.File.exist(f"{projPath}/data"):
                 DataHash = Utils.File.read(f"{projPath}/data")
                 data = {
@@ -660,14 +737,8 @@ class StudyProjectEnv:
                     ]
                 }
                 proj.data = data
-            if Utils.File.exist(f"{projPath}/setUp"):
-                setUpMd5Proj = Utils.Hash.function_md5(setUp)
-                setUpMd5 = Utils.File.read(f"{projPath}/setUp")
-                if setUpMd5Proj == setUpMd5:
-                    proj.setUp = setUp
-                else:
-                    proj.setUp = "outdated"
-                    print("SetUp is not the saved")
+            projHash = Utils.Hash.md5(f"{dataHash}\n{setUpMd5Proj}")
+            proj.v = StudyProjectEnv.getVersion(projHash, proj.id)
             return proj
         return None
 
@@ -761,11 +832,12 @@ class StudyProject:
 
         def create_project():
             Git.goToBranch("master")
-            Git.addBranch("project-" + Git.toBrancheName(id))
+            (brName, v) = StudyProjectEnv.addProjectBranch(id)
             df = " " * len(f"Project '{id}' ")
             print(f"Project '{id}' : creating...")
             proj = self(id)
             proj.setUp = setUp
+            proj.v = v
             print(df + ": setUp....")
             setUp(proj)
             print(df + ": ok")
