@@ -123,6 +123,9 @@ remove_dir(){
 				rm -rf "$1"
 				echo "'$1' directory removed"
 			fi
+		else
+			rm -rf "$1"
+			echo "'$1' directory removed"
 		fi
 	fi
 }
