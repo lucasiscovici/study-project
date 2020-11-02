@@ -370,5 +370,13 @@ else
 	PORT="$a"
 fi
 
-docker run --name "$NAME" --rm -d -p "$PORT":"$PORT_NB" -v  "$WORKDIR:/home/jovyan/work" "$IMAGE" start-notebook.sh --NotebookApp.token="$TOKEN" --NotebookApp.allow_password_change=True &> /dev/null
+docker run --name "$NAME" --rm -d -p "$PORT":"$PORT_NB" -v  "$WORKDIR:/home/study-project/work" "$IMAGE" start-notebook.sh --NotebookApp.token="$TOKEN"  &> /dev/null
 echo "Docker container started : '$NAME'"
+if [[ "$OPEN" = "1" ]]; then
+			portContainer=$(find_container_addr "$NAME")
+			if [[ -z "$portContainer" ]]; then
+				echo "PORT du container '$NAME' not found"
+				exit 1
+			fi
+			open_in_browser  "$portContainer"
+		fi
