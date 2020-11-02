@@ -367,5 +367,5 @@ else
 	PORT="$a"
 fi
 
-docker run --name "$NAME" --rm -d -p "$PORT":"$PORT_NB" -v  "$WORKDIR:/home/jovyan/work" "$IMAGE" start-notebook.sh --NotebookApp.token="$TOKEN" &> /dev/null
+docker run --name "$NAME" --rm -d -p "$PORT":"$PORT_NB" -v  "$WORKDIR:/home/jovyan/work" "$IMAGE" start-notebook.sh --NotebookApp.token="$TOKEN" --NotebookApp.allow_password_change=True &> /dev/null
 echo "Docker container started : '$NAME'"
