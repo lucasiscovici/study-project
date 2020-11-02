@@ -378,16 +378,13 @@ class Dvc:
         if to not in ["csv"]:
             print(f"to:'{to}' not implemented")
             return
-        df.to_csv(file.get_filename("csv"), index=index)
         if len(path) > 0:
             path = path + "/"
+        df.to_csv(f"{path}{name}.{ext}", index=index)
         main.main(
             [
                 "add",
-                "--external",
-                "--file",
-                f"{path}{name}.{ext}.dvc",
-                file.filename,
+                f"{path}{name}.{ext}",
             ]
         )
 
