@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 
+import dvc.api
 import git
 from dvc import main
 
@@ -17,12 +18,24 @@ class Utils:
                 f"^.*{pattern}{sep}(.+)$", text, flags=re.MULTILINE
             )[0].strip()
 
+        @staticmethod
+        def match(text, pattern):
+            import re
+
+            return re.match(pattern, text) is not None
+
     class Hash:
         @staticmethod
         def md5(string):
             import hashlib
 
             return hashlib.md5(string.encode()).hexdigest()  # nosec
+
+        @staticmethod
+        def function_md5(func):
+            import inspect
+
+            return Utils.Hash.md5(inspect.getsource(func))
 
     class Df:
         @staticmethod
@@ -36,6 +49,15 @@ class Utils:
             s = io.StringIO()
             Utils.Df.to_csv(df, s, index=index)
             return s.getvalue()
+
+        @staticmethod
+        def from_csv_string(csvString):
+            import io
+
+            import pandas as pd
+
+            s = io.StringIO(csvString)
+            return pd.read_csv(s)
 
     class String:
         @staticmethod
@@ -54,15 +76,27 @@ class Utils:
 
             return re.sub("[^a-zA-Z0-9 ]", "", text)
 
+        @staticmethod
+        def parse(text, sep=":"):
+            import re
+
+            dico = {}
+            for i in text.split("\n"):
+                m = re.findall(f"^([^{sep}]+){sep}(.+)$", i)
+                dico[m[0][0].strip()] = m[0][1].strip()
+            return dico
+
     class Shell:
         @staticmethod
-        def command(commandString):
+        def command(commandString, shell=False):
             import shlex
             import subprocess
 
             process = subprocess.Popen(
-                shlex.split(commandString), stdout=subprocess.PIPE, shell=False
-            )
+                shlex.split(commandString) if not shell else commandString,
+                stdout=subprocess.PIPE,
+                shell=shell,
+            )  # nosec
             output, error = process.communicate()
             return Struct(
                 **{
@@ -101,10 +135,18 @@ class Utils:
             file.filename = filename
             file.delete()
 
+        @staticmethod
+        def touch(file):
+            Utils.Shell.command(f"touch '{file}'")
+
     class Dir:
         @staticmethod
         def mk(dir, p=None):
             os.mkdir(dir)
+
+        @staticmethod
+        def exist(dir):
+            return os.path.isdir(dir)
 
     @staticmethod
     def ifelse(condition, true, false=""):
@@ -176,12 +218,16 @@ class Git:
         return rep.output.strip().decode("utf-8")
 
     @staticmethod
-    def deleteBranch(name):
-        Utils.Shell.command(f"git branch -d {name}")
+    def deleteBranch(name, force=False):
+        Utils.Shell.command(
+            f"git branch {Utils.ifelse(force,'-D','-d')} {name}"
+        )
 
     @staticmethod
     def checkBranch(name):
-        rep = Utils.Shell.command(f"git branch  --list '{name}' | tr -d ' '")
+        rep = Utils.Shell.command(
+            f"git branch  --list '{name}' | tr -d ' '", shell=True
+        )
         if rep.error:
             raise Exception(rep)
         branch = rep.output
@@ -350,6 +396,16 @@ class Dvc:
         file = Utils.File.read(f"{path}{filename}.{ext}.dvc")
         return Utils.RE.captureValueInLine(file, "md5")
 
+    @staticmethod
+    def open(fileName):
+        with dvc.api.open(fileName) as fd:
+            text = fd.read()
+        return text
+
+    @staticmethod
+    def read(fileName):
+        return dvc.api.read(fileName)
+
 
 class StudyProjectEnv:
     installed = False
@@ -358,6 +414,10 @@ class StudyProjectEnv:
     prefixe = "study_project : "
     default_branch = "study_project_set_up"
     data_path = "data"
+
+    @staticmethod
+    def add():
+        Git.add([StudyProjectEnv.path + "/"])
 
     @staticmethod
     def check_installed():
@@ -370,13 +430,24 @@ class StudyProjectEnv:
         print("\tset up study_project...")
         os.mkdir(StudyProjectEnv.path)
         os.mkdir(StudyProjectEnv.data_path)
+        Utils.File.touch(StudyProjectEnv.data_path + "/.gitignore")
         os.mkdir(StudyProjectEnv.path + "/projects")
+        Utils.File.touch(StudyProjectEnv.path + "/projects" + "/.gitignore")
         os.mkdir(StudyProjectEnv.path + "/studies")
+        Utils.File.touch(StudyProjectEnv.path + "/studies" + "/.gitignore")
         os.mkdir(StudyProjectEnv.path + "/data")
+        Utils.File.touch(StudyProjectEnv.path + "/data" + "/.gitignore")
         Utils.Shell.command(f"touch {StudyProjectEnv.path}/.gitignore")
         print("\tstudy_project initialized")
         StudyProjectEnv.installed = True
-        Git.add([StudyProjectEnv.path])
+        Git.add(
+            [
+                StudyProjectEnv.path,
+                StudyProjectEnv.path + "/",
+                StudyProjectEnv.data_path,
+                StudyProjectEnv.data_path + "/",
+            ]
+        )
         StudyProjectEnv.commit("study_project installed")
 
     @staticmethod
@@ -437,7 +508,7 @@ class StudyProjectEnv:
 
     @staticmethod
     def goToBranch(name):
-        Git.goToBranch()
+        Git.goToBranch(name)
 
     @staticmethod
     def commit(message, prefixe=None):
@@ -466,15 +537,55 @@ class StudyProjectEnv:
         if not Utils.File.exist(projPath + "/" + dataHash):
             StudyProjectEnv.addData(data.train, data.fileName + "_train")
             StudyProjectEnv.addData(data.test, data.fileName + "_test")
-            StudyProjectEnv.addData(data.target, data.fileName + "_target")
-            fileStr = f"""
-id: {data.id}
-comment: {data.comment}
-train: {data.md5_train}
-test: {data.md5_test}
-target: {data.md5_target}
-"""
+            fileStr = Data.get_file_export(
+                data,
+                lambda name, data_: StudyProjectEnv.addData(
+                    data_, data.fileName + f"_data_{name}"
+                ),
+            )
             Utils.File.write(fileStr, projPath + "/" + dataHash)
+
+    @staticmethod
+    def getFileData(dataParsed, data_name, id):
+        fileName = Git.toBrancheName(id, sep="_")
+        path = f"{StudyProjectEnv.data_path}/{fileName}_{data_name}.csv"
+        pathDvc = f"{path}.dvc"
+        if Utils.File.exist(pathDvc):  # save fileName in data
+            dataFile = Utils.File.read(pathDvc)
+            md5File = Utils.RE.captureValueInLine(dataFile, "md5")
+            pathFile = Utils.RE.captureValueInLine(dataFile, "path")
+            if dataParsed[data_name] == md5File:
+                fileData = Dvc.read(pathFile)
+                return Utils.Df.from_csv_string(fileData)
+
+    @staticmethod
+    def getData(dataHash):
+        projPath = StudyProjectEnv.path + "/data"
+        if Utils.File.exist(projPath + "/" + dataHash):
+            dataString = Utils.File.read(projPath + "/" + dataHash)
+            dataParsed2 = Utils.String.parse(
+                dataString, sep=":"
+            )  # {i: Utils.String.parse(dataString,sep=":") for i in ["id","comment","train","test","target"]}
+            data = {}
+            dataParsed = {}
+            for k, v in dataParsed2.items():
+                if Utils.RE.match(k, "^data."):
+                    data[k[len("data.") :]] = StudyProjectEnv.getFileData(
+                        {"data_" + k[len("data.") :]: v},
+                        "data_" + k[len("data.") :],
+                        dataParsed["id"],
+                    )
+                else:
+                    dataParsed[k] = v
+            dataParsed["data"] = data
+            dataFiles = {
+                i: StudyProjectEnv.getFileData(dataParsed, i, dataParsed["id"])
+                for i in ["train", "test"]
+            }
+            dataReady = {**dataParsed, **dataFiles}
+            return Data().setData(**dataReady)
+        print("error : {projPath + " / " + dataHash}")
+        return Data()
 
     @staticmethod
     def forgotData(dataHash):
@@ -487,10 +598,9 @@ target: {data.md5_target}
             + "/projects/"
             + Git.toBrancheName(project.id, sep="_")
         )
-        try:
+        if not Utils.Dir.exist(projPath):
             Utils.Dir.mk(projPath)
-        except Exception as e:
-            print(e)
+
         # os.mkdir(StudyProjectEnv.path+"/project/"+Git.toBrancheName(project.id,sep="_")+"/studies")
         # os.mkdir(StudyProjectEnv.path+"/project/"+Git.toBrancheName(project.id,sep="_")+"/data")
 
@@ -515,21 +625,62 @@ target: {data.md5_target}
             for i in pastData:
                 StudyProjectEnv.forgotData(i)
 
+        setUpMd5Proj = Utils.Hash.function_md5(project.setUp)
+        if Utils.File.exist(f"{projPath}/setUp"):
+            setUpMd5 = Utils.File.read(f"{projPath}/setUp")
+            if setUpMd5Proj == setUpMd5:
+                return
+        Utils.File.write(
+            Utils.Hash.function_md5(project.setUp), filename=f"{projPath}/setUp"
+        )
+
+        StudyProjectEnv.add()
+        StudyProjectEnv.commit(f"save Project '{project.id}'")
+
         # studiesHash=[study.get_hash() for study in project.studies.values()]
         # Utils.File.write("\n".join(dataHash),filename=f"{projPath}/studies")
 
         # hash([project.data,project.studies])
         # StudyProjectEnv.create_project()
 
+    @staticmethod
+    def getProject(id, setUp):
+        projPath = (
+            StudyProjectEnv.path + "/projects/" + Git.toBrancheName(id, sep="_")
+        )
+        if Utils.Dir.exist(projPath):
+            proj = StudyProject(id)
+            if Utils.File.exist(f"{projPath}/data"):
+                DataHash = Utils.File.read(f"{projPath}/data")
+                data = {
+                    i.id: i
+                    for i in [
+                        StudyProjectEnv.getData(Datahashi)
+                        for Datahashi in DataHash.split("\n")
+                    ]
+                }
+                proj.data = data
+            if Utils.File.exist(f"{projPath}/setUp"):
+                setUpMd5Proj = Utils.Hash.function_md5(setUp)
+                setUpMd5 = Utils.File.read(f"{projPath}/setUp")
+                if setUpMd5Proj == setUpMd5:
+                    proj.setUp = setUp
+                else:
+                    proj.setUp = "outdated"
+                    print("SetUp is not the saved")
+            return proj
+        return None
+
 
 class Data:
-    def setData(self, id, train, test, target, comment=""):
+    def setData(self, /, id, train, test, target, comment="", data={}):
         # check is pandas df, series
         self.id = id
         self.train = train
         self.test = test
         self.target = target
         self.comment = comment
+        self.data = data
 
         # maybe -> StudyProjectEnv should do that
         brName = Git.toBrancheName(id)
@@ -538,27 +689,43 @@ class Data:
         (new, md5_train) = StudyProjectEnv.addData(
             self.train, f"{fileName}_train"
         )
-        (new2, md5_target) = StudyProjectEnv.addData(
-            self.target, f"{fileName}_target"
-        )
-        (new3, md5_test) = StudyProjectEnv.addData(
+        # (new2, md5_target) = StudyProjectEnv.addData(
+        #     self.target, f"{fileName}_target"
+        # )
+        (new2, md5_test) = StudyProjectEnv.addData(
             self.test, f"{fileName}_test"
         )
-        self.md5_target = md5_target
+        new3 = False
+        data_md5 = {}
+        for k, v in self.data.items():
+            (new_, md5_data_) = StudyProjectEnv.addData(
+                v, f"{fileName}_data_{k}"
+            )
+            data_md5[k] = md5_data_
+            new3 = new3 or new_
+        self.data_md5 = data_md5
         self.md5_train = md5_train
         self.md5_test = md5_test
         if new or new2 or new3:
             StudyProjectEnv.commit(f"add Data '{id}'")
         # StudyProjectEnv.addBranch(f"add-data-{brName}")
+        return self
 
-    def get_hash(data):
-        fileStr = f"""
-id: {data.id}
-comment: {data.comment}
+    @staticmethod
+    def get_file_export(data, data_data_cb=lambda name, data_: True):
+        comment = data.comment.replace("\n", "\\n")
+        fileStr = f"""id: {data.id}
+comment: {comment}
+target: {data.target}
 train: {data.md5_train}
-test: {data.md5_test}
-target: {data.md5_target}
-"""
+test: {data.md5_test}"""
+        for name, data_ in data.data.items():
+            data_data_cb(name, data_)
+            fileStr += f"\ndata.{name}: {data.data_md5[name]}"
+        return fileStr
+
+    def get_hash(self):
+        fileStr = Data.get_file_export(self)
         return Utils.Hash.md5(fileStr)
 
 
@@ -571,21 +738,19 @@ class Study:
 
 
 class StudyProject:
-    proj = {}
-
     def __init__(self, id):
         self.data = {}
         self.studies = {}
         self.id = id
 
-    def saveData(self, id, train, test, target, comment=""):
+    def saveData(self, id, train, test, target, comment="", data={}):
         if id in self.data:
             print(f"\tData '{id}' : loaded ")
             return self.data[id]
         print(f"\tData '{id}' : creating... ")
-        data = Data()
-        data.setData(id, train, test, target, comment)
-        self.data[id] = data
+        dataObj = Data()
+        dataObj.setData(id, train, test, target, comment, data)
+        self.data[id] = dataObj
         print(f"\tData '{id}' : ok ")
         StudyProjectEnv.saveProject(self)
 
@@ -593,22 +758,35 @@ class StudyProject:
     def getOrCreate(self, id, setUp, recreate=False):
         if not StudyProjectEnv.check_all_installed():
             return
+
+        def create_project():
+            Git.goToBranch("master")
+            Git.addBranch("project-" + Git.toBrancheName(id))
+            df = " " * len(f"Project '{id}' ")
+            print(f"Project '{id}' : creating...")
+            proj = self(id)
+            proj.setUp = setUp
+            print(df + ": setUp....")
+            setUp(proj)
+            print(df + ": ok")
+            StudyProjectEnv.saveProject(proj)
+            return proj
+
         # "project-"+Git.toBrancheName(id)
         if Git.checkBranch("project-" + Git.toBrancheName(id)):
             Git.goToBranch("project-" + Git.toBrancheName(id))
-            # load project
+            project = StudyProjectEnv.getProject(id, setUp)
+            # setUpMd5=Utils.Hash.function_md5(setUp)
+            if project.setUp == "outdated":
+                return create_project()
+            if project is not None:
+                print(f"Project '{id}' : loaded")
+                return project
+            print(f"Project {id} not load !!!")
             return
-        if id in self.proj:
-            print(f"Project '{id}' : loaded")
+            # load projectloaded")
             return self.proj[id]
-        Git.addBranch("project-" + Git.toBrancheName(id))
-        df = " " * len(f"Project '{id}' ")
-        print(f"Project '{id}' : creating...")
-        self.proj[id] = self(id)
-        print(df + ": setUp....")
-        setUp(self.proj[id])
-        print(df + ": ok")
-        StudyProjectEnv.saveProject(self.proj[id])
+        return create_project()
 
     def getOrCreateStudy(self, id, setUp=None, data=None):
         if id in self.studies:
