@@ -231,7 +231,7 @@ class Git:
     def checkBranch(name):
         rep = Utils.Shell.command(
             f"git branch  --list '{name}' | tr -d ' '", shell=True
-        )
+        )  # nosec
         if rep.error:
             raise Exception(rep)
         branch = rep.output
