@@ -677,12 +677,13 @@ class StudyProjectEnv:
         os.mkdir(StudyProjectEnv.data_path)
         Utils.File.touch(StudyProjectEnv.data_path + "/.gitignore")
         os.mkdir(StudyProjectEnv.path + "/projects")
+        os.mkdir(StudyProjectEnv.path + "/.config")
         Utils.File.touch(StudyProjectEnv.path + "/projects" + "/.gitignore")
         os.mkdir(StudyProjectEnv.path + "/studies")
         Utils.File.touch(StudyProjectEnv.path + "/studies" + "/.gitignore")
         os.mkdir(StudyProjectEnv.path + "/data")
         Utils.File.touch(StudyProjectEnv.path + "/data" + "/.gitignore")
-        Utils.Shell.command(f"touch {StudyProjectEnv.path}/.gitignore")
+        Utils.File.write(".config", f"{StudyProjectEnv.path}/.gitignore")
         print("\tstudy_project initialized")
         StudyProjectEnv.installed = True
         Git.add(
@@ -703,12 +704,27 @@ class StudyProjectEnv:
         return brName
 
     @staticmethod
-    def getVersions(id):
-        projPath = StudyProjectEnv.getProjPath(id)
-        if not Utils.File.exist(projPath + "/versions"):
-            return ""
-        versions = Utils.File.read(projPath + "/versions")
+    def getProjectVersions(id):
+        projName = StudyProjectEnv.getProjectBranchName(id)
+        # StudyProjectEnv.getConfigProject(id)
+        if Utils.File.exist(f"{StudyProjectEnv.path}/.config/{projName}"):
+            return Utils.File.read(f"{StudyProjectEnv.path}/.config/{projName}")
+        return ""
+
+    @staticmethod
+    def saveProjectVersions(id, versions):
+        projName = StudyProjectEnv.getProjectBranchName(id)
+        if not Utils.Dir.exist(f"{StudyProjectEnv.path}/.config"):
+            Utils.Dir.mk(f"{StudyProjectEnv.path}/.config")
+        Utils.File.write(
+            versions, filename=f"{StudyProjectEnv.path}/.config/{projName}"
+        )
         return versions
+
+    @staticmethod
+    def getVersions(id):
+        # projName = StudyProjectEnv.getProjectBranchName(id)
+        return StudyProjectEnv.getProjectVersions(id)
 
     @staticmethod
     def getVersion(hash, id):
@@ -717,9 +733,7 @@ class StudyProjectEnv:
 
     @staticmethod
     def saveVersions(id, versions):
-        projPath = StudyProjectEnv.getProjPath(id)
-        Utils.File.write(versions, filename=projPath + "/versions")
-        return versions
+        return StudyProjectEnv.saveProjectVersions(id, versions)
 
     @staticmethod
     def getVersionsDict(id):
@@ -728,22 +742,20 @@ class StudyProjectEnv:
 
     @staticmethod
     def getVersionNumber(id):
-        brName = Git.toBrancheName(id)
         versions = StudyProjectEnv.getVersionsDict(id)
-        return len(versions)
+        return len(versions) // 2
 
     @staticmethod
     def addVersion(v, hash, id):
         versions = StudyProjectEnv.getVersions(id)
+        versionsDict = Utils.String.parse(versions)
         last = f"{versions}\n" if len(versions) > 0 else ""
         StudyProjectEnv.saveVersions(id, f"{last}{hash}: {v}\n{v}: {hash}")
 
     @staticmethod
     def addProjectBranch(id):
         nb = StudyProjectEnv.getVersionNumber(id)
-        brName = (
-            f"{StudyProjectEnv.project_prefixe}-{Git.toBrancheName(id)}-v{nb}"
-        )
+        brName = StudyProjectEnv.getProjectBranchName(id, nb)
         Git.addBranch(brName)
         return (brName, nb)
 
@@ -785,6 +797,37 @@ class StudyProjectEnv:
             print("Study Project OK")
             return True
         return True
+
+    @staticmethod
+    def find_projects():
+        from collections import defaultdict
+
+        branches = Git.getBranches(
+            pattern=f"^{StudyProjectEnv.project_prefixe}-.+"
+        )
+        proj = defaultdict(list)
+        for i in branches:
+            projName = Utils.RE.findall(
+                text=i, pattern=f"^{StudyProjectEnv.project_prefixe}-(.+)-v.+$"
+            )[0]
+            proj[projName].append(i)
+
+        for projName, branch in proj.items():
+            projList = []
+            for i in branch:
+                StudyProjectEnv.goToBranch(i)
+
+                projList.append()
+
+        return proj
+
+    @staticmethod
+    def check_config():
+        if not Utils.Dir.exist(f"{StudyProjectEnv.path}/.config"):
+            Utils.Dir.mk(StudyProjectEnv.path + "/.config")
+            Utils.File.write(".config", f"{StudyProjectEnv.path}/.gitignore")
+            StudyProjectEnv.find_projects()
+        # print("OK")
 
     @staticmethod
     def check_init():
@@ -938,15 +981,19 @@ class StudyProjectEnv:
                 return
         Utils.File.write(setUpMd5Proj, filename=f"{projPath}/setUp")
 
+        addCommit()
+
         upVersion("", setUpMd5Proj)
 
-        addCommit()
+    @staticmethod
+    def getProjectBranchName(id, v=None):
+        versions = "" if v is None else f"-v{v}"
+        return f"{StudyProjectEnv.project_prefixe}-{Git.toBrancheName(id)}{versions}"
 
     @staticmethod
     def getProjectBranch(id, setUp):
-        branchName = (
-            StudyProjectEnv.project_prefixe + "-" + Git.toBrancheName(id)
-        )
+        branchName = StudyProjectEnv.getProjectBranchName(id)
+
         setUpMd5Proj = Utils.Hash.function_md5(setUp)
         projHash = Utils.Hash.md5(f"\n{setUpMd5Proj}")
         v = StudyProjectEnv.getVersion(projHash, id)
