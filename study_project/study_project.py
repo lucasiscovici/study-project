@@ -1105,10 +1105,11 @@ class Study:
 
 
 class StudyProject:
-    def __init__(self, id):
+    def __init__(self, id, saveProject=True):
         self.data = {}
         self.studies = {}
         self.id = id
+        self.saveProject = saveProject
 
     def saveData(self, id, train, test, target, comment="", data={}):
         if id in self.data:
@@ -1119,18 +1120,21 @@ class StudyProject:
         dataObj.setData(id, train, test, target, comment, data)
         self.data[id] = dataObj
         print(f"\tData '{id}' : ok ")
-        StudyProjectEnv.saveProject(self)
+
+        if self.saveProject:
+            StudyProjectEnv.saveProject(self)
 
     @classmethod
     def getOrCreate(self, id, setUp, recreate=False):
         if not StudyProjectEnv.check_all_installed():
             return
+        StudyProjectEnv.check_config()
 
         def create_project():
             Git.goToBranch("master")
             (brName, v) = StudyProjectEnv.addProjectBranch(id)
             df = " " * len(f"Project '{id}' ")
-            print(f"Project '{id}' : creating...")
+            print(f"Project '{id}' (v{v}) : creating...")
             proj = self(id)
             proj.setUp = setUp
             proj.v = v
@@ -1142,6 +1146,7 @@ class StudyProject:
 
         # "project-"+Git.toBrancheName(id)
         projectBranch = StudyProjectEnv.getProjectBranch(id, setUp)
+        # print("projectBranch",projectBranch)
         if projectBranch is not None and Git.checkBranch(projectBranch):
             Git.goToBranch(projectBranch)
             project = StudyProjectEnv.getProject(id, setUp)
@@ -1149,7 +1154,7 @@ class StudyProject:
             if project.setUp == "outdated":
                 return create_project()
             if project is not None:
-                print(f"Project '{id}' : loaded")
+                print(f"Project '{id}' (v{project.v}) : loaded")
                 return project
             print(f"Project {id} not load !!!")
             return
