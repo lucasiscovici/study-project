@@ -1,14 +1,190 @@
 # mypy: ignore-errors
+import ast
+import inspect
+import io
 import os
 import sys
 import tempfile
 
+import cloudpickle
 import dvc.api
 import git
 from dvc import main
 
 
+class StudyProjectPickle(cloudpickle.CloudPickler):
+    def __init__(
+        self,
+        file,
+        protocol=None,
+        buffer_callback=None,
+        cb_reducer_override=lambda obj, superValue: True,
+    ):
+        super().__init__(file, protocol, buffer_callback)
+        self.cb_reducer_override = cb_reducer_override
+
+    def reducer_override(self, obj):
+        superValue = super().reducer_override(obj)
+        if self.cb_reducer_override:
+            self.cb_reducer_override(obj, superValue)
+        return superValue
+
+
+def unicodetoascii(text):
+
+    uni2ascii = {
+        ord("\xe2\x80\x99".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\x9c".decode("utf-8")): ord('"'),
+        ord("\xe2\x80\x9d".decode("utf-8")): ord('"'),
+        ord("\xe2\x80\x9e".decode("utf-8")): ord('"'),
+        ord("\xe2\x80\x9f".decode("utf-8")): ord('"'),
+        ord("\xc3\xa9".decode("utf-8")): ord("e"),
+        ord("\xe2\x80\x9c".decode("utf-8")): ord('"'),
+        ord("\xe2\x80\x93".decode("utf-8")): ord("-"),
+        ord("\xe2\x80\x92".decode("utf-8")): ord("-"),
+        ord("\xe2\x80\x94".decode("utf-8")): ord("-"),
+        ord("\xe2\x80\x94".decode("utf-8")): ord("-"),
+        ord("\xe2\x80\x98".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\x9b".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\x90".decode("utf-8")): ord("-"),
+        ord("\xe2\x80\x91".decode("utf-8")): ord("-"),
+        ord("\xe2\x80\xb2".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\xb3".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\xb4".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\xb5".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\xb6".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\xb7".decode("utf-8")): ord("'"),
+        ord("\xe2\x81\xba".decode("utf-8")): ord("+"),
+        ord("\xe2\x81\xbb".decode("utf-8")): ord("-"),
+        ord("\xe2\x81\xbc".decode("utf-8")): ord("="),
+        ord("\xe2\x81\xbd".decode("utf-8")): ord("("),
+        ord("\xe2\x81\xbe".decode("utf-8")): ord(")"),
+    }
+    return text.decode("utf-8").translate(uni2ascii).encode("ascii")
+
+
+class ImportFinder(ast.NodeVisitor):
+    def __init__(self):
+        self.imports = []
+
+    def processImport(self, full_name):
+        self.imports.append(full_name)
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            self.processImport(alias.name)
+
+    def visit_ImportFrom(self, node):
+        if node.module == "__future__":
+            return
+
+        for alias in node.names:
+            name = alias.name
+            fullname = f"{node.module}.{name}" if node.module else name
+            self.processImport(fullname)
+
+
 class Utils:
+    class Pickle:
+        @staticmethod
+        def find_imports(text):
+            root = ast.parse(text)
+            visitor = ImportFinder()
+            visitor.visit(root)
+            return visitor.imports
+
+        @staticmethod
+        def find_imports_from_obj(obj):
+            return Utils.Pickle.find_imports(inspect.getsource(obj).strip())
+
+        @staticmethod
+        def dump(
+            obj,
+            file,
+            protocol=None,
+            buffer_callback=None,
+            return_modules=False,
+            log=False,
+        ):
+            """Serialize obj as bytes streamed into file
+            protocol defaults to cloudpickle.DEFAULT_PROTOCOL which is an alias to
+            pickle.HIGHEST_PROTOCOL. This setting favors maximum communication
+            speed between processes running the same Python version.
+            Set protocol=pickle.DEFAULT_PROTOCOL instead if you need to ensure
+            compatibility with older versions of Python.
+            """
+            modules = set()
+
+            def cb_reducer(obj, value):
+                if log:
+                    print(
+                        "(Utils.Pickle.dump:cb_reducer:obj,value) : ",
+                        obj,
+                        value,
+                    )
+                if hasattr(obj, "__module__"):
+                    modules.add(obj.__module__)
+
+            pickler = StudyProjectPickle(
+                file,
+                protocol=protocol,
+                buffer_callback=buffer_callback,
+                cb_reducer_override=cb_reducer if return_modules else None,
+            )
+            pickler.dump(obj)
+            if return_modules:
+                return modules
+
+        load = cloudpickle.load
+        loads = cloudpickle.loads
+
+        @staticmethod
+        def dumps(
+            obj,
+            protocol=None,
+            buffer_callback=None,
+            return_modules=False,
+            log=False,
+        ):
+            """Serialize obj as a string of bytes allocated in memory
+            protocol defaults to cloudpickle.DEFAULT_PROTOCOL which is an alias to
+            pickle.HIGHEST_PROTOCOL. This setting favors maximum communication
+            speed between processes running the same Python version.
+            Set protocol=pickle.DEFAULT_PROTOCOL instead if you need to ensure
+            compatibility with older versions of Python.
+            """
+            modules = list()
+
+            def cb_reducer(obj, value):
+                if log:
+                    print(
+                        "(Utils.Pickle.dumps:cb_reducer:obj,value) : ",
+                        obj,
+                        value,
+                    )
+                if hasattr(obj, "__module__"):
+                    modules.append(obj.__module__)
+                    try:
+                        m = Utils.Pickle.find_imports_from_obj(obj)
+                        modules.extend(list(m))
+                    except Exception as e:
+                        pass
+
+            with io.BytesIO() as file:
+                cp = StudyProjectPickle(
+                    file,
+                    protocol=protocol,
+                    buffer_callback=buffer_callback,
+                    cb_reducer_override=cb_reducer if return_modules else None,
+                )
+                cp.dump(obj)
+                modules = set(modules)
+                return (
+                    file.getvalue()
+                    if not return_modules
+                    else (file.getvalue(), modules)
+                )
+
     class RE:
         @staticmethod
         def captureValueInLine(text, pattern, sep=":"):
