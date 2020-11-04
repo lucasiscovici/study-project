@@ -200,6 +200,12 @@ class Utils:
 
             return re.match(pattern, text) is not None
 
+        @staticmethod
+        def findall(text, pattern, flags=None):
+            import re
+
+            return re.findall(pattern, text)
+
     class Hash:
         @staticmethod
         def md5(string):
@@ -266,6 +272,10 @@ class Utils:
                 dico[m[0][0].strip()] = m[0][1].strip()
             return dico
 
+        @staticmethod
+        def unicodeToString(uni):
+            return unicodetoascii(uni)
+
     class Shell:
         @staticmethod
         def command(commandString, shell=False):
@@ -281,9 +291,11 @@ class Utils:
             return Struct(
                 **{
                     "output": output.decode("utf-8"),
+                    "output_orgi": output,
                     "error": output.decode("utf-8")
                     if (output and "error" in output.decode("utf-8").lower())
                     else error,
+                    "errorOrig": error,
                     "commandString": commandString,
                 }
             )
@@ -310,6 +322,13 @@ class Utils:
         def tmp(ext="csv"):
             file = TMP_FILE()
             return file.get_filename(ext)
+
+        @staticmethod
+        def write_in_tmp(text, ext="csv"):
+            file = TMP_FILE()
+            filename = file.get_filename(ext)
+            Utils.File.write(text, filename)
+            return filename
 
         @staticmethod
         def tmp_delete(filename):
