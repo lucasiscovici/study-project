@@ -1,14 +1,190 @@
 # mypy: ignore-errors
+import ast
+import inspect
+import io
 import os
 import sys
 import tempfile
 
+import cloudpickle
 import dvc.api
 import git
 from dvc import main
 
 
+class StudyProjectPickle(cloudpickle.CloudPickler):
+    def __init__(
+        self,
+        file,
+        protocol=None,
+        buffer_callback=None,
+        cb_reducer_override=lambda obj, superValue: True,
+    ):
+        super().__init__(file, protocol, buffer_callback)
+        self.cb_reducer_override = cb_reducer_override
+
+    def reducer_override(self, obj):
+        superValue = super().reducer_override(obj)
+        if self.cb_reducer_override:
+            self.cb_reducer_override(obj, superValue)
+        return superValue
+
+
+def unicodetoascii(text):
+
+    uni2ascii = {
+        ord("\xe2\x80\x99".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\x9c".decode("utf-8")): ord('"'),
+        ord("\xe2\x80\x9d".decode("utf-8")): ord('"'),
+        ord("\xe2\x80\x9e".decode("utf-8")): ord('"'),
+        ord("\xe2\x80\x9f".decode("utf-8")): ord('"'),
+        ord("\xc3\xa9".decode("utf-8")): ord("e"),
+        ord("\xe2\x80\x9c".decode("utf-8")): ord('"'),
+        ord("\xe2\x80\x93".decode("utf-8")): ord("-"),
+        ord("\xe2\x80\x92".decode("utf-8")): ord("-"),
+        ord("\xe2\x80\x94".decode("utf-8")): ord("-"),
+        ord("\xe2\x80\x94".decode("utf-8")): ord("-"),
+        ord("\xe2\x80\x98".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\x9b".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\x90".decode("utf-8")): ord("-"),
+        ord("\xe2\x80\x91".decode("utf-8")): ord("-"),
+        ord("\xe2\x80\xb2".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\xb3".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\xb4".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\xb5".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\xb6".decode("utf-8")): ord("'"),
+        ord("\xe2\x80\xb7".decode("utf-8")): ord("'"),
+        ord("\xe2\x81\xba".decode("utf-8")): ord("+"),
+        ord("\xe2\x81\xbb".decode("utf-8")): ord("-"),
+        ord("\xe2\x81\xbc".decode("utf-8")): ord("="),
+        ord("\xe2\x81\xbd".decode("utf-8")): ord("("),
+        ord("\xe2\x81\xbe".decode("utf-8")): ord(")"),
+    }
+    return text.decode("utf-8").translate(uni2ascii).encode("ascii")
+
+
+class ImportFinder(ast.NodeVisitor):
+    def __init__(self):
+        self.imports = []
+
+    def processImport(self, full_name):
+        self.imports.append(full_name)
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            self.processImport(alias.name)
+
+    def visit_ImportFrom(self, node):
+        if node.module == "__future__":
+            return
+
+        for alias in node.names:
+            name = alias.name
+            fullname = f"{node.module}.{name}" if node.module else name
+            self.processImport(fullname)
+
+
 class Utils:
+    class Pickle:
+        @staticmethod
+        def find_imports(text):
+            root = ast.parse(text)
+            visitor = ImportFinder()
+            visitor.visit(root)
+            return visitor.imports
+
+        @staticmethod
+        def find_imports_from_obj(obj):
+            return Utils.Pickle.find_imports(inspect.getsource(obj).strip())
+
+        @staticmethod
+        def dump(
+            obj,
+            file,
+            protocol=None,
+            buffer_callback=None,
+            return_modules=False,
+            log=False,
+        ):
+            """Serialize obj as bytes streamed into file
+            protocol defaults to cloudpickle.DEFAULT_PROTOCOL which is an alias to
+            pickle.HIGHEST_PROTOCOL. This setting favors maximum communication
+            speed between processes running the same Python version.
+            Set protocol=pickle.DEFAULT_PROTOCOL instead if you need to ensure
+            compatibility with older versions of Python.
+            """
+            modules = set()
+
+            def cb_reducer(obj, value):
+                if log:
+                    print(
+                        "(Utils.Pickle.dump:cb_reducer:obj,value) : ",
+                        obj,
+                        value,
+                    )
+                if hasattr(obj, "__module__"):
+                    modules.add(obj.__module__)
+
+            pickler = StudyProjectPickle(
+                file,
+                protocol=protocol,
+                buffer_callback=buffer_callback,
+                cb_reducer_override=cb_reducer if return_modules else None,
+            )
+            pickler.dump(obj)
+            if return_modules:
+                return modules
+
+        load = cloudpickle.load
+        loads = cloudpickle.loads
+
+        @staticmethod
+        def dumps(
+            obj,
+            protocol=None,
+            buffer_callback=None,
+            return_modules=False,
+            log=False,
+        ):
+            """Serialize obj as a string of bytes allocated in memory
+            protocol defaults to cloudpickle.DEFAULT_PROTOCOL which is an alias to
+            pickle.HIGHEST_PROTOCOL. This setting favors maximum communication
+            speed between processes running the same Python version.
+            Set protocol=pickle.DEFAULT_PROTOCOL instead if you need to ensure
+            compatibility with older versions of Python.
+            """
+            modules = list()
+
+            def cb_reducer(obj, value):
+                if log:
+                    print(
+                        "(Utils.Pickle.dumps:cb_reducer:obj,value) : ",
+                        obj,
+                        value,
+                    )
+                if hasattr(obj, "__module__"):
+                    modules.append(obj.__module__)
+                    try:
+                        m = Utils.Pickle.find_imports_from_obj(obj)
+                        modules.extend(list(m))
+                    except Exception as e:
+                        pass
+
+            with io.BytesIO() as file:
+                cp = StudyProjectPickle(
+                    file,
+                    protocol=protocol,
+                    buffer_callback=buffer_callback,
+                    cb_reducer_override=cb_reducer if return_modules else None,
+                )
+                cp.dump(obj)
+                modules = set(modules)
+                return (
+                    file.getvalue()
+                    if not return_modules
+                    else (file.getvalue(), modules)
+                )
+
     class RE:
         @staticmethod
         def captureValueInLine(text, pattern, sep=":"):
@@ -23,6 +199,12 @@ class Utils:
             import re
 
             return re.match(pattern, text) is not None
+
+        @staticmethod
+        def findall(text, pattern, flags=None):
+            import re
+
+            return re.findall(pattern, text)
 
     class Hash:
         @staticmethod
@@ -90,6 +272,10 @@ class Utils:
                 dico[m[0][0].strip()] = m[0][1].strip()
             return dico
 
+        @staticmethod
+        def unicodeToString(uni):
+            return unicodetoascii(uni)
+
     class Shell:
         @staticmethod
         def command(commandString, shell=False):
@@ -105,9 +291,11 @@ class Utils:
             return Struct(
                 **{
                     "output": output.decode("utf-8"),
+                    "output_orgi": output,
                     "error": output.decode("utf-8")
                     if (output and "error" in output.decode("utf-8").lower())
                     else error,
+                    "errorOrig": error,
                     "commandString": commandString,
                 }
             )
@@ -134,6 +322,13 @@ class Utils:
         def tmp(ext="csv"):
             file = TMP_FILE()
             return file.get_filename(ext)
+
+        @staticmethod
+        def write_in_tmp(text, ext="csv"):
+            file = TMP_FILE()
+            filename = file.get_filename(ext)
+            Utils.File.write(text, filename)
+            return filename
 
         @staticmethod
         def tmp_delete(filename):
@@ -217,6 +412,47 @@ class Git:
         g.tag(["-a", f"'{name}'", "-m", f"'{desc}'"])
 
     @staticmethod
+    def getRefBranches():
+        rep = Utils.Shell.command("git branch --format '%(refname)'")
+        if rep.error:
+            raise Exception(rep)
+        return rep.output.strip()
+
+    @staticmethod
+    def getRefAndHeadBranches():
+        rep = Utils.Shell.command(
+            " git branch --format '%(refname) %(objectname)'"
+        )
+        if rep.error:
+            raise Exception(rep)
+        return rep.output.strip()
+
+    @staticmethod
+    def getBranches(pattern=None, withHash=False):
+        if not withHash:
+            refBranches = Git.getRefBranches()
+
+            branches = [i.split("/")[2] for i in refBranches.split("\n")]
+            if pattern is not None:
+                return [
+                    i
+                    for i in branches
+                    if Utils.RE.match(text=i, pattern=pattern)
+                ]
+            return branches
+        refBranches = Utils.String.parse(Git.getRefAndHeadBranches(), sep=" ")
+        branches = {
+            ref.split("/")[2]: head for ref, head in refBranches.items()
+        }
+        if pattern is not None:
+            return {
+                k: v
+                for k, v in branches.items()
+                if Utils.RE.match(text=k, pattern=pattern)
+            }
+        return branches
+
+    @staticmethod
     def getBranch():
         rep = Utils.Shell.command(f"git branch --show-current")
         if rep.error:
@@ -240,7 +476,7 @@ class Git:
         return len(branch) > 0
 
     @staticmethod
-    def addBranch(name, checkout=True):
+    def addBranch(name, checkout=True, show_rep=False):
         if Git.checkBranch(name):
             return
         if checkout:
@@ -255,11 +491,16 @@ class Git:
         return "-c core.hooksPath=/dev/null"
 
     @staticmethod
-    def goToBranch(name, no_hooks=False):
+    def goToBranch(name, no_hooks=False, show_rep=False):
         # g = git.cmd.Git(os.getcwd())
         # g.checkout([f"{name}"])
         hooks = Git.getNoHooks() if no_hooks else ""
-        Utils.Shell.command(f"git {hooks} checkout {name}")
+        rep = Utils.Shell.command(f"git {hooks} checkout {name}")
+        if show_rep:
+            print(rep)
+        if rep.error:
+            print(rep)
+            raise Exception(rep)
 
     @staticmethod
     def toBrancheName(name, sep="-"):
@@ -436,12 +677,13 @@ class StudyProjectEnv:
         os.mkdir(StudyProjectEnv.data_path)
         Utils.File.touch(StudyProjectEnv.data_path + "/.gitignore")
         os.mkdir(StudyProjectEnv.path + "/projects")
+        os.mkdir(StudyProjectEnv.path + "/.config")
         Utils.File.touch(StudyProjectEnv.path + "/projects" + "/.gitignore")
         os.mkdir(StudyProjectEnv.path + "/studies")
         Utils.File.touch(StudyProjectEnv.path + "/studies" + "/.gitignore")
         os.mkdir(StudyProjectEnv.path + "/data")
         Utils.File.touch(StudyProjectEnv.path + "/data" + "/.gitignore")
-        Utils.Shell.command(f"touch {StudyProjectEnv.path}/.gitignore")
+        Utils.File.write(".config", f"{StudyProjectEnv.path}/.gitignore")
         print("\tstudy_project initialized")
         StudyProjectEnv.installed = True
         Git.add(
@@ -462,12 +704,27 @@ class StudyProjectEnv:
         return brName
 
     @staticmethod
-    def getVersions(id):
-        projPath = StudyProjectEnv.getProjPath(id)
-        if not Utils.File.exist(projPath + "/versions"):
-            return ""
-        versions = Utils.File.read(projPath + "/versions")
+    def getProjectVersions(id):
+        projName = StudyProjectEnv.getProjectBranchName(id)
+        # StudyProjectEnv.getConfigProject(id)
+        if Utils.File.exist(f"{StudyProjectEnv.path}/.config/{projName}"):
+            return Utils.File.read(f"{StudyProjectEnv.path}/.config/{projName}")
+        return ""
+
+    @staticmethod
+    def saveProjectVersions(id, versions):
+        projName = StudyProjectEnv.getProjectBranchName(id)
+        if not Utils.Dir.exist(f"{StudyProjectEnv.path}/.config"):
+            Utils.Dir.mk(f"{StudyProjectEnv.path}/.config")
+        Utils.File.write(
+            versions, filename=f"{StudyProjectEnv.path}/.config/{projName}"
+        )
         return versions
+
+    @staticmethod
+    def getVersions(id):
+        # projName = StudyProjectEnv.getProjectBranchName(id)
+        return StudyProjectEnv.getProjectVersions(id)
 
     @staticmethod
     def getVersion(hash, id):
@@ -476,9 +733,7 @@ class StudyProjectEnv:
 
     @staticmethod
     def saveVersions(id, versions):
-        projPath = StudyProjectEnv.getProjPath(id)
-        Utils.File.write(versions, filename=projPath + "/versions")
-        return versions
+        return StudyProjectEnv.saveProjectVersions(id, versions)
 
     @staticmethod
     def getVersionsDict(id):
@@ -487,22 +742,20 @@ class StudyProjectEnv:
 
     @staticmethod
     def getVersionNumber(id):
-        brName = Git.toBrancheName(id)
         versions = StudyProjectEnv.getVersionsDict(id)
-        return len(versions)
+        return len(versions) // 2
 
     @staticmethod
     def addVersion(v, hash, id):
         versions = StudyProjectEnv.getVersions(id)
+        versionsDict = Utils.String.parse(versions)
         last = f"{versions}\n" if len(versions) > 0 else ""
         StudyProjectEnv.saveVersions(id, f"{last}{hash}: {v}\n{v}: {hash}")
 
     @staticmethod
     def addProjectBranch(id):
         nb = StudyProjectEnv.getVersionNumber(id)
-        brName = (
-            f"{StudyProjectEnv.project_prefixe}-{Git.toBrancheName(id)}-v{nb}"
-        )
+        brName = StudyProjectEnv.getProjectBranchName(id, nb)
         Git.addBranch(brName)
         return (brName, nb)
 
@@ -544,6 +797,37 @@ class StudyProjectEnv:
             print("Study Project OK")
             return True
         return True
+
+    @staticmethod
+    def find_projects():
+        from collections import defaultdict
+
+        branches = Git.getBranches(
+            pattern=f"^{StudyProjectEnv.project_prefixe}-.+"
+        )
+        proj = defaultdict(list)
+        for i in branches:
+            projName = Utils.RE.findall(
+                text=i, pattern=f"^{StudyProjectEnv.project_prefixe}-(.+)-v.+$"
+            )[0]
+            proj[projName].append(i)
+
+        for projName, branch in proj.items():
+            projList = []
+            for i in branch:
+                StudyProjectEnv.goToBranch(i)
+
+                projList.append()
+
+        return proj
+
+    @staticmethod
+    def check_config():
+        if not Utils.Dir.exist(f"{StudyProjectEnv.path}/.config"):
+            Utils.Dir.mk(StudyProjectEnv.path + "/.config")
+            Utils.File.write(".config", f"{StudyProjectEnv.path}/.gitignore")
+            StudyProjectEnv.find_projects()
+        # print("OK")
 
     @staticmethod
     def check_init():
@@ -697,15 +981,19 @@ class StudyProjectEnv:
                 return
         Utils.File.write(setUpMd5Proj, filename=f"{projPath}/setUp")
 
+        addCommit()
+
         upVersion("", setUpMd5Proj)
 
-        addCommit()
+    @staticmethod
+    def getProjectBranchName(id, v=None):
+        versions = "" if v is None else f"-v{v}"
+        return f"{StudyProjectEnv.project_prefixe}-{Git.toBrancheName(id)}{versions}"
 
     @staticmethod
     def getProjectBranch(id, setUp):
-        branchName = (
-            StudyProjectEnv.project_prefixe + "-" + Git.toBrancheName(id)
-        )
+        branchName = StudyProjectEnv.getProjectBranchName(id)
+
         setUpMd5Proj = Utils.Hash.function_md5(setUp)
         projHash = Utils.Hash.md5(f"\n{setUpMd5Proj}")
         v = StudyProjectEnv.getVersion(projHash, id)
@@ -817,10 +1105,11 @@ class Study:
 
 
 class StudyProject:
-    def __init__(self, id):
+    def __init__(self, id, saveProject=True):
         self.data = {}
         self.studies = {}
         self.id = id
+        self.saveProject = saveProject
 
     def saveData(self, id, train, test, target, comment="", data={}):
         if id in self.data:
@@ -831,18 +1120,21 @@ class StudyProject:
         dataObj.setData(id, train, test, target, comment, data)
         self.data[id] = dataObj
         print(f"\tData '{id}' : ok ")
-        StudyProjectEnv.saveProject(self)
+
+        if self.saveProject:
+            StudyProjectEnv.saveProject(self)
 
     @classmethod
     def getOrCreate(self, id, setUp, recreate=False):
         if not StudyProjectEnv.check_all_installed():
             return
+        StudyProjectEnv.check_config()
 
         def create_project():
             Git.goToBranch("master")
             (brName, v) = StudyProjectEnv.addProjectBranch(id)
             df = " " * len(f"Project '{id}' ")
-            print(f"Project '{id}' : creating...")
+            print(f"Project '{id}' (v{v}) : creating...")
             proj = self(id)
             proj.setUp = setUp
             proj.v = v
@@ -854,6 +1146,7 @@ class StudyProject:
 
         # "project-"+Git.toBrancheName(id)
         projectBranch = StudyProjectEnv.getProjectBranch(id, setUp)
+        # print("projectBranch",projectBranch)
         if projectBranch is not None and Git.checkBranch(projectBranch):
             Git.goToBranch(projectBranch)
             project = StudyProjectEnv.getProject(id, setUp)
@@ -861,7 +1154,7 @@ class StudyProject:
             if project.setUp == "outdated":
                 return create_project()
             if project is not None:
-                print(f"Project '{id}' : loaded")
+                print(f"Project '{id}' (v{project.v}) : loaded")
                 return project
             print(f"Project {id} not load !!!")
             return
