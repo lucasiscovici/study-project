@@ -412,6 +412,47 @@ class Git:
         g.tag(["-a", f"'{name}'", "-m", f"'{desc}'"])
 
     @staticmethod
+    def getRefBranches():
+        rep = Utils.Shell.command("git branch --format '%(refname)'")
+        if rep.error:
+            raise Exception(rep)
+        return rep.output.strip()
+
+    @staticmethod
+    def getRefAndHeadBranches():
+        rep = Utils.Shell.command(
+            " git branch --format '%(refname) %(objectname)'"
+        )
+        if rep.error:
+            raise Exception(rep)
+        return rep.output.strip()
+
+    @staticmethod
+    def getBranches(pattern=None, withHash=False):
+        if not withHash:
+            refBranches = Git.getRefBranches()
+
+            branches = [i.split("/")[2] for i in refBranches.split("\n")]
+            if pattern is not None:
+                return [
+                    i
+                    for i in branches
+                    if Utils.RE.match(text=i, pattern=pattern)
+                ]
+            return branches
+        refBranches = Utils.String.parse(Git.getRefAndHeadBranches(), sep=" ")
+        branches = {
+            ref.split("/")[2]: head for ref, head in refBranches.items()
+        }
+        if pattern is not None:
+            return {
+                k: v
+                for k, v in branches.items()
+                if Utils.RE.match(text=k, pattern=pattern)
+            }
+        return branches
+
+    @staticmethod
     def getBranch():
         rep = Utils.Shell.command(f"git branch --show-current")
         if rep.error:
@@ -435,7 +476,7 @@ class Git:
         return len(branch) > 0
 
     @staticmethod
-    def addBranch(name, checkout=True):
+    def addBranch(name, checkout=True, show_rep=False):
         if Git.checkBranch(name):
             return
         if checkout:
@@ -450,11 +491,16 @@ class Git:
         return "-c core.hooksPath=/dev/null"
 
     @staticmethod
-    def goToBranch(name, no_hooks=False):
+    def goToBranch(name, no_hooks=False, show_rep=False):
         # g = git.cmd.Git(os.getcwd())
         # g.checkout([f"{name}"])
         hooks = Git.getNoHooks() if no_hooks else ""
-        Utils.Shell.command(f"git {hooks} checkout {name}")
+        rep = Utils.Shell.command(f"git {hooks} checkout {name}")
+        if show_rep:
+            print(rep)
+        if rep.error:
+            print(rep)
+            raise Exception(rep)
 
     @staticmethod
     def toBrancheName(name, sep="-"):
