@@ -5,6 +5,7 @@ import io
 import os
 import sys
 import tempfile
+import warnings
 
 import cloudpickle
 import dvc.api
@@ -402,19 +403,32 @@ class Struct(dict):
 
 class Git:
     installed = False
+    path = ".git"
+    gitignore = ".gitignore"
+
+    @staticmethod
+    def getGit():
+        return git.cmd.Git(os.getcwd())
+
+    @staticmethod
+    def commandGit(command, *args, **xargs):
+        rep = Utils.Shell.command(f"git {command}", *args, **xargs)
+        return rep
 
     @staticmethod
     def check_installed():
-        return Git.installed or os.path.isdir(os.getcwd() + "/.git")
+        return Git.installed or os.path.isdir(os.getcwd() + f"/{Git.path}")
 
     @staticmethod
-    def install(add=True, commit=True, message="git installed"):
+    def install(add=True, commit=True, message="git installed", name=None):
         print("\tset up Git...")
-        g = git.cmd.Git(os.getcwd())
+        g = Git.getGit()
         g.init()
-        Utils.Shell.command("touch .gitignore")
+        if name is not None:
+            Git.addBranch(name)
+        Utils.Shell.command(f"touch {Git.gitignore}")
         if add:
-            Git.add([".gitignore"])
+            Git.add([Git.gitignore])
         if commit:
             StudyProjectEnv.commit(message)
         print("\tGit initialized")
@@ -422,24 +436,38 @@ class Git:
 
     @staticmethod
     def addTag(name, desc):
-        g = git.cmd.Git(os.getcwd())
+        g = Git.getGit()
         g.tag(["-a", f"'{name}'", "-m", f"'{desc}'"])
 
     @staticmethod
     def getRefBranches():
-        rep = Utils.Shell.command("git branch --format '%(refname)'")
+        rep = Git.commandGit("branch --format '%(refname)'")
         if rep.error:
             raise Exception(rep)
         return rep.output.strip()
 
     @staticmethod
     def getRefAndHeadBranches():
-        rep = Utils.Shell.command(
-            " git branch --format '%(refname) %(objectname)'"
-        )
+        rep = Git.commandGit("branch --format '%(refname) %(objectname)'")
         if rep.error:
             raise Exception(rep)
         return rep.output.strip()
+
+    @staticmethod
+    def reset():
+        rep = Git.commandGit("reset")
+        if rep.error:
+            raise Exception(rep)
+
+    @staticmethod
+    def ignoreChanges(pathToIgnore=[]):
+        if len(pathToIgnore) == 0:
+            rep = Git.commandGit("rm --cached --ignore-unmatch *")
+            if rep.error:
+                raise Exception(rep)
+        else:
+            g = Git.getGit()
+            g.rm(["--cached"] + pathToIgnore)
 
     @staticmethod
     def getBranches(pattern=None, withHash=False):
@@ -468,21 +496,19 @@ class Git:
 
     @staticmethod
     def getBranch():
-        rep = Utils.Shell.command(f"git branch --show-current")
+        rep = Git.commandGit(f"branch --show-current")
         if rep.error:
             raise Exception(rep)
         return rep.output.strip()
 
     @staticmethod
     def deleteBranch(name, force=False):
-        Utils.Shell.command(
-            f"git branch {Utils.ifelse(force,'-D','-d')} {name}"
-        )
+        Git.commandGit(f"branch {Utils.ifelse(force,'-D','-d')} {name}")
 
     @staticmethod
     def checkBranch(name):
-        rep = Utils.Shell.command(
-            f"git branch  --list '{name}' | tr -d ' '", shell=True  # nosec
+        rep = Git.commandGit(
+            f"branch  --list '{name}' | tr -d ' '", shell=True  # nosec
         )
         if rep.error:
             raise Exception(rep)
@@ -494,27 +520,74 @@ class Git:
         if Git.checkBranch(name):
             return
         if checkout:
-            g = git.cmd.Git(os.getcwd())
+            g = Git.getGit()
             g.checkout(["-b", f"{name}"])
         else:
-            g = git.cmd.Git(os.getcwd())
+            g = Git.getGit()
             g.branch([f"{name}"])
 
     @staticmethod
     def getNoHooks():
-        return "-c core.hooksPath=/dev/null"
+        return " -c core.hooksPath=/dev/null "
 
     @staticmethod
-    def goToBranch(name, no_hooks=False, show_rep=False):
-        # g = git.cmd.Git(os.getcwd())
+    def getStaged():
+        stagedString = Git.commandGit(
+            "diff --name-only --cached"
+        ).output.rstrip()
+        if len(stagedString) == 0:
+            return []
+        return stagedString.split("\n")
+
+    @staticmethod
+    def getModified():
+        stagedString = Git.commandGit("diff --name-only").output.rstrip()
+        if len(stagedString) == 0:
+            return []
+        return stagedString.split("\n")
+
+    @staticmethod
+    def temporaryCommit():
+        m = Git.getModified()
+        if len(m) == 0:
+            return False
+        Git.reset()
+        # print(Git.getBranch(),m)
+        Git.ignoreChanges(m)
+        # Git.add(u=True)
+        staged = Git.getStaged()
+        # print(staged)
+        if len(staged) == 0:
+            return False
+        StudyProjectEnv.commit("tempCommit")
+        return True
+
+    @staticmethod
+    def backCommit():
+        Git.commandGit("reset --mixed HEAD^1")
+
+    @staticmethod
+    def temporaryCommitBack():
+        Git.backCommit()
+        # Git.reset()
+
+    @staticmethod
+    def goToBranch(name, no_hooks=False, show_rep=False, no_reset=True):
+        # g = Git.getGit()
         # g.checkout([f"{name}"])
+
+        tempCommit = Git.temporaryCommit() if not no_reset else False
+        # if not no_reset:
+        #     Git.reset()
+        #     Git.ignoreChanges()
         hooks = Git.getNoHooks() if no_hooks else ""
-        rep = Utils.Shell.command(f"git {hooks} checkout {name}")
+        rep = Git.commandGit(f"{hooks}checkout {name}")
         if show_rep:
             print(rep)
         if rep.error:
             print(rep)
             raise Exception(rep)
+        return tempCommit
 
     @staticmethod
     def toBrancheName(name, sep="-"):
@@ -545,16 +618,18 @@ class Git:
             commiter = Git.getConfigUser(author)
             author = f'--author="{author}"'
             message = message.replace("'", '"')
-            rep = Utils.Shell.command(
-                f"git {commiter} commit {author} -m '{message}'"
-            )
+            rep = Git.commandGit(f"{commiter} commit {author} -m '{message}'")
             if rep.error:
+                print(rep)
                 raise Exception(rep.error)
             # if rep.output:
             #   print(rep.output,rep.commandString)
             return
-        g = git.cmd.Git(os.getcwd())
-        g.commit([author, "-m", f"'{message}'"])
+        g = Git.getGit()
+        if author:
+            g.commit([author, "-m", f"'{message}'"])
+        else:
+            g.commit(["-m", f"'{message}'"])
 
     @staticmethod
     def merge(branch, no_ff=True, message="", author=""):
@@ -562,8 +637,8 @@ class Git:
             commiter = Git.getConfigUser(author)
             message = message.replace("'", '"')
             messageN = f"-m '{message}'"
-            rep = Utils.Shell.command(
-                f"git {commiter} merge {Utils.ifelse(no_ff,'--no-ff')} {Utils.ifelse(message,messageN)} {branch}"
+            rep = Git.commandGit(
+                f"{commiter} merge {Utils.ifelse(no_ff,'--no-ff')} {Utils.ifelse(message,messageN)} {branch}"
             )
             if rep.error:
                 print(rep)
@@ -571,13 +646,17 @@ class Git:
             # if rep.output:
             #   print(rep.output, rep.commandString)
             return
-        g = git.cmd.Git(os.getcwd())
+        g = Git.getGit()
         g.merge([Utils.ifelse(no_ff, "--no-ff"), branch])
 
     @staticmethod
-    def add(listToAdd):
-        g = git.cmd.Git(os.getcwd())
-        g.add([] + listToAdd)
+    def add(listToAdd=[], u=False):
+
+        g = Git.getGit()
+        if u:
+            g.add("-u", [] + listToAdd)
+        else:
+            g.add([] + listToAdd)
 
     @staticmethod
     def checkIdentity():
@@ -591,8 +670,8 @@ class Git:
 
     @staticmethod
     def config(k, v=None, globally=False, remove=False):
-        return Utils.Shell.command(
-            f"git config {Utils.ifelse(globally,'--global')} {Utils.ifelse(v is None and not remove,'--get')} {Utils.ifelse(remove,'--unset')} {k} {Utils.ifelse(v is not None, v)}"
+        return Git.commandGit(
+            f"config {Utils.ifelse(globally,'--global')} {Utils.ifelse(v is None and not remove,'--get')} {Utils.ifelse(remove,'--unset')} {k} {Utils.ifelse(v is not None, v)}"
         )
 
 
