@@ -387,9 +387,10 @@ class TMP_FILE:
         os.remove(self.filename)
 
 
-class Struct:
-    def __init__(self, **entries):
-        self.__dict__.update(entries)
+class Struct(dict):
+    def __init__(self, **kw):
+        dict.__init__(self, kw)
+        self.__dict__.update(kw)
 
     def __str__(self):
         a = ""
