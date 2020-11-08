@@ -1341,6 +1341,65 @@ cd "$root_dir"
 
 
 class Data:
+    @staticmethod
+    def getTrainName(fileName):
+        return f"{fileName}_train"
+
+    @staticmethod
+    def getTestName(fileName):
+        return f"{fileName}_test"
+
+    @staticmethod
+    def getDataName(fileName, k):
+        return f"{fileName}_data_{k}"
+
+    @staticmethod
+    def getData(dataHash):
+        projPath = (
+            StudyProjectEnv.path + f"/{StudyProjectEnv.study_project_data}"
+        )
+        if Utils.File.exist(projPath + "/" + dataHash):
+            dataString = Utils.File.read(projPath + "/" + dataHash)
+            dataParsed2 = Utils.String.parse(
+                dataString, sep=":"
+            )  # {i: Utils.String.parse(dataString,sep=":") for i in ["id","comment","train","test","target"]}
+            data = {}
+            dataParsed = {}
+            for k, v in dataParsed2.items():
+                if Utils.RE.match(k, "^data."):
+                    data[k[len("data.") :]] = StudyProjectEnv.getFileData(
+                        {"data_" + k[len("data.") :]: v},
+                        "data_" + k[len("data.") :],
+                        dataParsed["id"],
+                    )
+                else:
+                    dataParsed[k] = v
+            dataParsed["data"] = data
+            dataFiles = {
+                i: StudyProjectEnv.getFileData(dataParsed, i, dataParsed["id"])
+                for i in ["train", "test"]
+            }
+            dataReady = {**dataParsed, **dataFiles}
+            return Data().setData(**dataReady)
+        print(f"error : {projPath}   /   {dataHash}")
+        return Data()
+
+    @staticmethod
+    def saveData(data, dataHash):
+        projPath = StudyProjectEnv.path + "/data"
+        if not Utils.File.exist(projPath + "/" + dataHash):
+            StudyProjectEnv.addData(
+                data.train, Data.getTrainName(data.fileName)
+            )
+            StudyProjectEnv.addData(data.test, Data.getTestName(data.fileName))
+            fileStr = Data.get_file_export(
+                data,
+                lambda name, data_: StudyProjectEnv.addData(
+                    data_, Data.getDataName(data.fileName, name)
+                ),
+            )
+            Utils.File.write(fileStr, projPath + "/" + dataHash)
+
     def setData(self, /, id, train, test, target, comment="", data={}):
         # check is pandas df, series
         self.id = id
@@ -1355,19 +1414,19 @@ class Data:
         self.fileName = Git.toBrancheName(id, sep="_")
         fileName = self.fileName
         (new, md5_train) = StudyProjectEnv.addData(
-            self.train, f"{fileName}_train"
+            self.train, Data.getTrainName(fileName)
         )
         # (new2, md5_target) = StudyProjectEnv.addData(
         #     self.target, f"{fileName}_target"
         # )
         (new2, md5_test) = StudyProjectEnv.addData(
-            self.test, f"{fileName}_test"
+            self.test, Data.getTestName(fileName)
         )
         new3 = False
         data_md5 = {}
         for k, v in self.data.items():
             (new_, md5_data_) = StudyProjectEnv.addData(
-                v, f"{fileName}_data_{k}"
+                v, Data.getDataName(fileName, k)
             )
             data_md5[k] = md5_data_
             new3 = new3 or new_
