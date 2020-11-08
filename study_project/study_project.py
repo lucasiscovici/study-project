@@ -676,20 +676,61 @@ class Git:
 
 
 class Dvc:
+    path = ".dvc"
     installed = False
+    dvcignore = ".dvcignore"
     author = "DvcBot <DvcBot@DvcBot.DvcBot>"
+    textCheckDocker = """
+check_docker_container(){
+    container="${1}"
+    lignes=$(docker ps -a --filter "name=^${container}$" | wc -l | tr -d ' ')
+    [ "$lignes" -gt 1 ]
+    return $?
+}
+if [ -z "$DOCKER_CONTAINER_NAME" ]; then
+    if ! command -v dvc &> /dev/null
+    then
+        if ! command -v docker &> /dev/null
+        then
+            exit
+        else
+            if [ -f ".study-project-init" ]; then
+                DOCKER_CONTAINER_NAME=$(cat ".study-project-init")
+                if check_docker_container "$DOCKER_CONTAINER_NAME"
+                then
+                    alias exec="docker exec -d "$DOCKER_CONTAINER_NAME""
+                fi
+            fi
+        fi
+    fi
+fi
+"""
 
     @staticmethod
     def check_installed():
-        return Dvc.installed or os.path.isdir(os.getcwd() + "/.dvc")
+        return Dvc.installed or os.path.isdir(os.getcwd() + f"/{Dvc.path}")
+
+    @staticmethod
+    def changeHookDVC(name):
+        fileLines = Utils.File.read(f"{Git.path}/hooks/{name}").split("\n")
+        newLines = (
+            fileLines[:1] + Dvc.textCheckDocker.split("\n") + fileLines[1:]
+        )
+        Utils.File.write("\n".join(newLines), f"{Git.path}/hooks/{name}")
+
+    @staticmethod
+    def changeHooksDVC():
+        for i in ["pre-commit", "pre-push", "post-checkout"]:
+            Dvc.changeHookDVC(i)
 
     @staticmethod
     def install():
         print("\tset up dvc...")
         k = main.main(["init", "--quiet"])
         Dvc.config("core.autostage", "true")
-        Git.add([".dvc/config"])
+        Git.add([f"{Dvc.path}/config"])
         main.main(["install"])
+        Dvc.changeHooksDVC()
         StudyProjectEnv.commit("dvc installed (config+hooks)")
         print("\tDvc initialized")
         Dvc.installed = True
