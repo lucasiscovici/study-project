@@ -282,19 +282,32 @@ class Utils:
             import shlex
             import subprocess
 
-            process = subprocess.Popen(
+            # process = subprocess.Popen(
+            #     shlex.split(commandString) if not shell else commandString,
+            #     stdout=subprocess.PIPE,
+            #     shell=shell,  # nosec
+            # )
+            p = subprocess.run(
                 shlex.split(commandString) if not shell else commandString,
                 stdout=subprocess.PIPE,
-                shell=shell,  # nosec
+                stderr=subprocess.PIPE,
+                shell=shell,
             )
-            output, error = process.communicate()
+            output, error = p.stdout, p.stderr
+            error2 = (
+                None
+                if p.returncode == 0
+                else (
+                    output.decode("utf-8")
+                    if (output and "error" in output.decode("utf-8").lower())
+                    else error
+                )
+            )
             return Struct(
                 **{
                     "output": output.decode("utf-8"),
                     "output_orgi": output,
-                    "error": output.decode("utf-8")
-                    if (output and "error" in output.decode("utf-8").lower())
-                    else error,
+                    "error": error2,
                     "errorOrig": error,
                     "commandString": commandString,
                 }
