@@ -1465,6 +1465,11 @@ class Study:
 
 
 class StudyProject:
+    env = StudyProjectEnv
+    dvc = Dvc
+    git = Git
+    utils = Utils
+
     def __init__(self, id, saveProject=True):
         self.data = {}
         self.studies = {}
@@ -1479,47 +1484,119 @@ class StudyProject:
         dataObj = Data()
         dataObj.setData(id, train, test, target, comment, data)
         self.data[id] = dataObj
+        self.data = Struct(**self.data)
         print(f"\tData '{id}' : ok ")
 
         if self.saveProject:
             StudyProjectEnv.saveProject(self)
 
     @classmethod
-    def getOrCreate(self, id, setUp, recreate=False):
+    def getOrCreate(self, id, setUp=None, version=None, recreate=False):
         if not StudyProjectEnv.check_all_installed():
             return
-        StudyProjectEnv.check_config()
+
+        # GOTO BRANCH MASTER:
+        tempCommitBranchCurr = None
+        branchCurr = Git.getBranch()
+        if branchCurr != StudyProjectEnv.master:
+            # TODO: check if the branche is study-project and force to be in master if it
+            # print(f"getOrCreate {branchCurr}")
+            tempCommitBranchCurr = Git.goToBranch(
+                StudyProjectEnv.master, no_reset=False
+            )
+            if tempCommitBranchCurr:
+                warnings.warn(
+                    f"Ton travail a été commit dans un commit temporaire sur la branche {branchCurr}"
+                )
+            if Utils.RE.match(
+                pattern=f"^{StudyProjectEnv.prefix_branch}/", text=branchCurr
+            ):
+                branchCurr = StudyProjectEnv.nb
+                tempCommitBranchCurr = False
+        else:
+            branchCurr = StudyProjectEnv.nb
+            tempCommitBranchCurr = False
+
+        def comeBackMaster(tempCommit):
+            # print("comeBackMaster")
+            tempCommitToMaster = Git.goToBranch(
+                StudyProjectEnv.master, no_reset=False
+            )
+            if tempCommitToMaster:
+                warnings.warn(
+                    f"Wtf pb il y a eu un commit temporaire : '{Git.getBranch()}' [{tempCommit}] -> '{StudyProjectEnv.master}'? "
+                )
+                sys.exit()
+            if tempCommit:
+                Git.backCommit()
+
+        def comeBackBranchCurr():
+            # print("comeBackBranchCurr", Git.getBranch(),
+            # branchCur:r, tempCommitBranchCurr)
+            if Git.getBranch() == branchCurr:
+                return
+            tempCommitToBranchCurr = Git.goToBranch(branchCurr, no_reset=False)
+            if tempCommitToBranchCurr:
+                warnings.warn(
+                    f"Wtf pb il y a eu un commit temporaire : '{Git.getBranch()}' -> '{branchCurr}'? "
+                )
+                sys.exit()
+            if tempCommitBranchCurr:
+                Git.backCommit()
+                # tempCommitBranchCurr=False
 
         def create_project():
-            Git.goToBranch("master")
-            (brName, v) = StudyProjectEnv.addProjectBranch(id)
+            if setUp is None:
+                print("setUp must me set when create project")
+                comeBackBranchCurr()
+                return
+            if Git.getBranch() != StudyProjectEnv.master:
+                warnings.warn(f"Wtf tu fou quoi ici : '{branchCurr}' ? ")
+                sys.exit()
+                # Git.goToBranch(StudyProjectEnv.master)
+            (brName, v, tempCommit) = StudyProjectEnv.addProjectBranch(id)
             df = " " * len(f"Project '{id}' ")
             print(f"Project '{id}' (v{v}) : creating...")
             proj = self(id)
             proj.setUp = setUp
             proj.v = v
-            print(df + ": setUp....")
-            setUp(proj)
+            if setUp:
+                print(df + ": setUp....")
+                setUp(proj)
             print(df + ": ok")
             StudyProjectEnv.saveProject(proj)
+            # print(tempCommit)
+            comeBackMaster(tempCommit)
+            comeBackBranchCurr()
             return proj
 
         # "project-"+Git.toBrancheName(id)
-        projectBranch = StudyProjectEnv.getProjectBranch(id, setUp)
+        projectBranch = StudyProjectEnv.getProjectBranch(id, setUp, version)
         # print("projectBranch",projectBranch)
         if projectBranch is not None and Git.checkBranch(projectBranch):
-            Git.goToBranch(projectBranch)
+            tempCommit = Git.goToBranch(projectBranch, no_reset=False)
             project = StudyProjectEnv.getProject(id, setUp)
             # setUpMd5=Utils.Hash.function_md5(setUp)
-            if project.setUp == "outdated":
+            if project is not None and project.setUp == "outdated":
+                if tempCommitMaster:
+                    if len(Git.getModified()) > 0:
+                        warnings.warn(
+                            "project {id} outdated(setUp) in branch {projectBranch} but there are Modifed files"
+                        )
+                        sys.exit()
+                    comeBackMaster(tempCommit)
                 return create_project()
             if project is not None:
+                comeBackMaster(tempCommit)
+                comeBackBranchCurr()
                 print(f"Project '{id}' (v{project.v}) : loaded")
                 return project
+            comeBackMaster(tempCommit)
+            comeBackBranchCurr()
             print(f"Project {id} not load !!!")
             return
             # load projectloaded")
-            return self.proj[id]
+            # return self.proj[id]
         return create_project()
 
     def getOrCreateStudy(self, id, setUp=None, data=None):
