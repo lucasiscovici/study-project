@@ -292,7 +292,7 @@ class Utils:
                 shlex.split(commandString) if not shell else commandString,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                shell=shell,
+                shell=shell,  # nosec
             )
             output, error = p.stdout, p.stderr
             error2 = (
