@@ -370,8 +370,9 @@ else
 	PORT="$a"
 fi
 
-docker run --name "$NAME" --rm -d -p "$PORT":"$PORT_NB" -v  "$WORKDIR:/home/study-project/work" "$IMAGE" start-notebook.sh --NotebookApp.token="$TOKEN"  &> /dev/null
+docker run --env DOCKER_CONTAINER_NAME="$NAME" --name "$NAME" --rm -d -p "$PORT":"$PORT_NB" -v  "$WORKDIR:/home/study-project/work" "$IMAGE" start-notebook.sh --NotebookApp.token="$TOKEN"  &> /dev/null
 echo "Docker container started : '$NAME'"
+echo "$NAME" > "$WORKDIR/.study-project-init"
 if [[ "$OPEN" = "1" ]]; then
 			portContainer=$(find_container_addr "$NAME")
 			if [[ -z "$portContainer" ]]; then

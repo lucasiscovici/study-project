@@ -5,6 +5,7 @@ import io
 import os
 import sys
 import tempfile
+import warnings
 
 import cloudpickle
 import dvc.api
@@ -282,19 +283,32 @@ class Utils:
             import shlex
             import subprocess
 
-            process = subprocess.Popen(
+            # process = subprocess.Popen(
+            #     shlex.split(commandString) if not shell else commandString,
+            #     stdout=subprocess.PIPE,
+            #     shell=shell,  # nosec
+            # )
+            p = subprocess.run(
                 shlex.split(commandString) if not shell else commandString,
                 stdout=subprocess.PIPE,
-                shell=shell,  # nosec
+                stderr=subprocess.PIPE,
+                shell=shell,
             )
-            output, error = process.communicate()
+            output, error = p.stdout, p.stderr
+            error2 = (
+                None
+                if p.returncode == 0
+                else (
+                    output.decode("utf-8")
+                    if (output and "error" in output.decode("utf-8").lower())
+                    else error
+                )
+            )
             return Struct(
                 **{
                     "output": output.decode("utf-8"),
                     "output_orgi": output,
-                    "error": output.decode("utf-8")
-                    if (output and "error" in output.decode("utf-8").lower())
-                    else error,
+                    "error": error2,
                     "errorOrig": error,
                     "commandString": commandString,
                 }
@@ -374,9 +388,10 @@ class TMP_FILE:
         os.remove(self.filename)
 
 
-class Struct:
-    def __init__(self, **entries):
-        self.__dict__.update(entries)
+class Struct(dict):
+    def __init__(self, **kw):
+        dict.__init__(self, kw)
+        self.__dict__.update(kw)
 
     def __str__(self):
         a = ""
@@ -388,19 +403,32 @@ class Struct:
 
 class Git:
     installed = False
+    path = ".git"
+    gitignore = ".gitignore"
+
+    @staticmethod
+    def getGit():
+        return git.cmd.Git(os.getcwd())
+
+    @staticmethod
+    def commandGit(command, *args, **xargs):
+        rep = Utils.Shell.command(f"git {command}", *args, **xargs)
+        return rep
 
     @staticmethod
     def check_installed():
-        return Git.installed or os.path.isdir(os.getcwd() + "/.git")
+        return Git.installed or os.path.isdir(os.getcwd() + f"/{Git.path}")
 
     @staticmethod
-    def install(add=True, commit=True, message="git installed"):
+    def install(add=True, commit=True, message="git installed", name=None):
         print("\tset up Git...")
-        g = git.cmd.Git(os.getcwd())
+        g = Git.getGit()
         g.init()
-        Utils.Shell.command("touch .gitignore")
+        if name is not None:
+            Git.addBranch(name)
+        Utils.Shell.command(f"touch {Git.gitignore}")
         if add:
-            Git.add([".gitignore"])
+            Git.add([Git.gitignore])
         if commit:
             StudyProjectEnv.commit(message)
         print("\tGit initialized")
@@ -408,24 +436,38 @@ class Git:
 
     @staticmethod
     def addTag(name, desc):
-        g = git.cmd.Git(os.getcwd())
+        g = Git.getGit()
         g.tag(["-a", f"'{name}'", "-m", f"'{desc}'"])
 
     @staticmethod
     def getRefBranches():
-        rep = Utils.Shell.command("git branch --format '%(refname)'")
+        rep = Git.commandGit("branch --format '%(refname)'")
         if rep.error:
             raise Exception(rep)
         return rep.output.strip()
 
     @staticmethod
     def getRefAndHeadBranches():
-        rep = Utils.Shell.command(
-            " git branch --format '%(refname) %(objectname)'"
-        )
+        rep = Git.commandGit("branch --format '%(refname) %(objectname)'")
         if rep.error:
             raise Exception(rep)
         return rep.output.strip()
+
+    @staticmethod
+    def reset():
+        rep = Git.commandGit("reset")
+        if rep.error:
+            raise Exception(rep)
+
+    @staticmethod
+    def ignoreChanges(pathToIgnore=[]):
+        if len(pathToIgnore) == 0:
+            rep = Git.commandGit("rm --cached --ignore-unmatch *")
+            if rep.error:
+                raise Exception(rep)
+        else:
+            g = Git.getGit()
+            g.rm(["--cached"] + pathToIgnore)
 
     @staticmethod
     def getBranches(pattern=None, withHash=False):
@@ -454,21 +496,19 @@ class Git:
 
     @staticmethod
     def getBranch():
-        rep = Utils.Shell.command(f"git branch --show-current")
+        rep = Git.commandGit(f"branch --show-current")
         if rep.error:
             raise Exception(rep)
         return rep.output.strip()
 
     @staticmethod
     def deleteBranch(name, force=False):
-        Utils.Shell.command(
-            f"git branch {Utils.ifelse(force,'-D','-d')} {name}"
-        )
+        Git.commandGit(f"branch {Utils.ifelse(force,'-D','-d')} {name}")
 
     @staticmethod
     def checkBranch(name):
-        rep = Utils.Shell.command(
-            f"git branch  --list '{name}' | tr -d ' '", shell=True  # nosec
+        rep = Git.commandGit(
+            f"branch  --list '{name}' | tr -d ' '", shell=True  # nosec
         )
         if rep.error:
             raise Exception(rep)
@@ -480,27 +520,74 @@ class Git:
         if Git.checkBranch(name):
             return
         if checkout:
-            g = git.cmd.Git(os.getcwd())
+            g = Git.getGit()
             g.checkout(["-b", f"{name}"])
         else:
-            g = git.cmd.Git(os.getcwd())
+            g = Git.getGit()
             g.branch([f"{name}"])
 
     @staticmethod
     def getNoHooks():
-        return "-c core.hooksPath=/dev/null"
+        return " -c core.hooksPath=/dev/null "
 
     @staticmethod
-    def goToBranch(name, no_hooks=False, show_rep=False):
-        # g = git.cmd.Git(os.getcwd())
+    def getStaged():
+        stagedString = Git.commandGit(
+            "diff --name-only --cached"
+        ).output.rstrip()
+        if len(stagedString) == 0:
+            return []
+        return stagedString.split("\n")
+
+    @staticmethod
+    def getModified():
+        stagedString = Git.commandGit("diff --name-only").output.rstrip()
+        if len(stagedString) == 0:
+            return []
+        return stagedString.split("\n")
+
+    @staticmethod
+    def temporaryCommit():
+        m = Git.getModified()
+        if len(m) == 0:
+            return False
+        Git.reset()
+        # print(Git.getBranch(),m)
+        Git.ignoreChanges(m)
+        # Git.add(u=True)
+        staged = Git.getStaged()
+        # print(staged)
+        if len(staged) == 0:
+            return False
+        StudyProjectEnv.commit("tempCommit")
+        return True
+
+    @staticmethod
+    def backCommit():
+        Git.commandGit("reset --mixed HEAD^1")
+
+    @staticmethod
+    def temporaryCommitBack():
+        Git.backCommit()
+        # Git.reset()
+
+    @staticmethod
+    def goToBranch(name, no_hooks=False, show_rep=False, no_reset=True):
+        # g = Git.getGit()
         # g.checkout([f"{name}"])
+
+        tempCommit = Git.temporaryCommit() if not no_reset else False
+        # if not no_reset:
+        #     Git.reset()
+        #     Git.ignoreChanges()
         hooks = Git.getNoHooks() if no_hooks else ""
-        rep = Utils.Shell.command(f"git {hooks} checkout {name}")
+        rep = Git.commandGit(f"{hooks}checkout {name}")
         if show_rep:
             print(rep)
         if rep.error:
             print(rep)
             raise Exception(rep)
+        return tempCommit
 
     @staticmethod
     def toBrancheName(name, sep="-"):
@@ -531,16 +618,18 @@ class Git:
             commiter = Git.getConfigUser(author)
             author = f'--author="{author}"'
             message = message.replace("'", '"')
-            rep = Utils.Shell.command(
-                f"git {commiter} commit {author} -m '{message}'"
-            )
+            rep = Git.commandGit(f"{commiter} commit {author} -m '{message}'")
             if rep.error:
+                print(rep)
                 raise Exception(rep.error)
             # if rep.output:
             #   print(rep.output,rep.commandString)
             return
-        g = git.cmd.Git(os.getcwd())
-        g.commit([author, "-m", f"'{message}'"])
+        g = Git.getGit()
+        if author:
+            g.commit([author, "-m", f"'{message}'"])
+        else:
+            g.commit(["-m", f"'{message}'"])
 
     @staticmethod
     def merge(branch, no_ff=True, message="", author=""):
@@ -548,8 +637,8 @@ class Git:
             commiter = Git.getConfigUser(author)
             message = message.replace("'", '"')
             messageN = f"-m '{message}'"
-            rep = Utils.Shell.command(
-                f"git {commiter} merge {Utils.ifelse(no_ff,'--no-ff')} {Utils.ifelse(message,messageN)} {branch}"
+            rep = Git.commandGit(
+                f"{commiter} merge {Utils.ifelse(no_ff,'--no-ff')} {Utils.ifelse(message,messageN)} {branch}"
             )
             if rep.error:
                 print(rep)
@@ -557,13 +646,17 @@ class Git:
             # if rep.output:
             #   print(rep.output, rep.commandString)
             return
-        g = git.cmd.Git(os.getcwd())
+        g = Git.getGit()
         g.merge([Utils.ifelse(no_ff, "--no-ff"), branch])
 
     @staticmethod
-    def add(listToAdd):
-        g = git.cmd.Git(os.getcwd())
-        g.add([] + listToAdd)
+    def add(listToAdd=[], u=False):
+
+        g = Git.getGit()
+        if u:
+            g.add("-u", [] + listToAdd)
+        else:
+            g.add([] + listToAdd)
 
     @staticmethod
     def checkIdentity():
@@ -577,26 +670,67 @@ class Git:
 
     @staticmethod
     def config(k, v=None, globally=False, remove=False):
-        return Utils.Shell.command(
-            f"git config {Utils.ifelse(globally,'--global')} {Utils.ifelse(v is None and not remove,'--get')} {Utils.ifelse(remove,'--unset')} {k} {Utils.ifelse(v is not None, v)}"
+        return Git.commandGit(
+            f"config {Utils.ifelse(globally,'--global')} {Utils.ifelse(v is None and not remove,'--get')} {Utils.ifelse(remove,'--unset')} {k} {Utils.ifelse(v is not None, v)}"
         )
 
 
 class Dvc:
+    path = ".dvc"
     installed = False
+    dvcignore = ".dvcignore"
     author = "DvcBot <DvcBot@DvcBot.DvcBot>"
+    textCheckDocker = """
+check_docker_container(){
+    container="${1}"
+    lignes=$(docker ps -a --filter "name=^${container}$" | wc -l | tr -d ' ')
+    [ "$lignes" -gt 1 ]
+    return $?
+}
+if [ -z "$DOCKER_CONTAINER_NAME" ]; then
+    if ! command -v dvc &> /dev/null
+    then
+        if ! command -v docker &> /dev/null
+        then
+            exit
+        else
+            if [ -f ".study-project-init" ]; then
+                DOCKER_CONTAINER_NAME=$(cat ".study-project-init")
+                if check_docker_container "$DOCKER_CONTAINER_NAME"
+                then
+                    alias exec="docker exec -d "$DOCKER_CONTAINER_NAME""
+                fi
+            fi
+        fi
+    fi
+fi
+"""
 
     @staticmethod
     def check_installed():
-        return Dvc.installed or os.path.isdir(os.getcwd() + "/.dvc")
+        return Dvc.installed or os.path.isdir(os.getcwd() + f"/{Dvc.path}")
+
+    @staticmethod
+    def changeHookDVC(name):
+        fileLines = Utils.File.read(f"{Git.path}/hooks/{name}").split("\n")
+        newLines = (
+            fileLines[:1] + Dvc.textCheckDocker.split("\n") + fileLines[1:]
+        )
+        Utils.File.write("\n".join(newLines), f"{Git.path}/hooks/{name}")
+
+    @staticmethod
+    def changeHooksDVC():
+        for i in ["pre-commit", "pre-push", "post-checkout"]:
+            Dvc.changeHookDVC(i)
 
     @staticmethod
     def install():
         print("\tset up dvc...")
         k = main.main(["init", "--quiet"])
         Dvc.config("core.autostage", "true")
-        Git.add([".dvc/config"])
+        Git.add([f"{Dvc.path}/config"])
         main.main(["install"])
+        Dvc.changeHooksDVC()
         StudyProjectEnv.commit("dvc installed (config+hooks)")
         print("\tDvc initialized")
         Dvc.installed = True
@@ -652,17 +786,114 @@ class Dvc:
 
 
 class StudyProjectEnv:
+    prefix_branch = "study_project"
+    master = f"{prefix_branch}/study_project"
+    nb = "master"
     installed = False
+    path_docker_init = ".study-project-init"
     path = ".study_project"
+    study_project_config = ".config"
     step = 0
     prefixe = "study_project : "
     default_branch = "study_project_set_up"
     data_path = "data"
+    study_project_data = "data"
+    study_project_projects = "projects"
+    study_project_studies = "studies"
+    # proj
+    projSetUp = "setup"
+    projData = "data"
     project_prefixe = "project"
+    gitIgnore = f"""
+
+{path_docker_init}
+__pycache__/
+.ipynb_checkpoints/
+{Git.gitignore}.*
+{data_path}/*
+
+"""
+    gitIgnoreBranch = f"""
+*
+!/{path}/
+!/{path}/*
+!/{Dvc.path}/
+!/{Dvc.path}/*
+!/{data_path}/
+!/{data_path}/
+!{Git.gitignore}
+!{Dvc.dvcignore}
+
+"""
+    # TODO: alias git when destination path change per_exemple()
+    postCheckoutGitignoreCheck = f"""
+
+old_ref=$1
+new_ref=$2
+branch_switched=$3
+
+if [ $branch_switched != '1' ]
+then
+    echo "---- NO CHECKOUT ----"
+    exit 0
+fi
+echo "---- POST CHECKOUT ----"
+current_branch=$(git rev-parse --abbrev-ref HEAD | tr '/' '_')
+hook_dir=$(dirname $0)
+root_dir="$(pwd -P)"
+info_dir="$root_dir/{Git.path}/info"
+
+exclude_target='{Git.gitignore}'
+if [ -f "$root_dir/$exclude_target.$current_branch" ]
+then
+    echo "Prepare to use {Git.gitignore}.$current_branch as exclude file"
+    exclude_target={Git.gitignore}.$current_branch
+fi
+cd "$info_dir"
+rm exclude
+echo "Copy {Git.gitignore}.$current_branch file in place of exclude"
+cp "$root_dir/$exclude_target" exclude
+echo "--- POST CHECKOUT END ---"
+cd "$root_dir"
+
+"""
+
+    @staticmethod
+    def addGitIgnore():
+        Utils.File.write(f"{StudyProjectEnv.gitIgnore}", Git.gitignore)
+
+    @staticmethod
+    def addGitIgnoreBranch(branchName):
+        branchName = branchName.replace("/", "_")
+        Utils.File.write(
+            StudyProjectEnv.gitIgnoreBranch, f"{Git.gitignore}.{branchName}"
+        )
+
+    @staticmethod
+    def addPostCheckoutHook():
+        name = "post-checkout"
+        fileLines = Utils.File.read(f"{Git.path}/hooks/{name}").split("\n")
+        newLines = (
+            fileLines[:1]
+            + StudyProjectEnv.postCheckoutGitignoreCheck.split("\n")
+            + fileLines[1:]
+        )
+        Utils.File.write("\n".join(newLines), f"{Git.path}/hooks/{name}")
+
+    @staticmethod
+    def addPreCommitHook():
+        name = "pre-commit"
+        fileLines = Utils.File.read(f"{Git.path}/hooks/{name}").split("\n")
+        newLines = (
+            fileLines[:1]
+            + StudyProjectEnv.textPreCommit.split("\n")
+            + fileLines[1:]
+        )
+        Utils.File.write("\n".join(newLines), f"{Git.path}/hooks/{name}")
 
     @staticmethod
     def add():
-        Git.add([StudyProjectEnv.path + "/"])
+        Git.add([StudyProjectEnv.path + "/", Git.gitignore])
 
     @staticmethod
     def check_installed():
@@ -674,16 +905,43 @@ class StudyProjectEnv:
     def install():
         print("\tset up study_project...")
         os.mkdir(StudyProjectEnv.path)
+        StudyProjectEnv.addGitIgnore()
         os.mkdir(StudyProjectEnv.data_path)
-        Utils.File.touch(StudyProjectEnv.data_path + "/.gitignore")
-        os.mkdir(StudyProjectEnv.path + "/projects")
-        os.mkdir(StudyProjectEnv.path + "/.config")
-        Utils.File.touch(StudyProjectEnv.path + "/projects" + "/.gitignore")
-        os.mkdir(StudyProjectEnv.path + "/studies")
-        Utils.File.touch(StudyProjectEnv.path + "/studies" + "/.gitignore")
-        os.mkdir(StudyProjectEnv.path + "/data")
-        Utils.File.touch(StudyProjectEnv.path + "/data" + "/.gitignore")
-        Utils.File.write(".config", f"{StudyProjectEnv.path}/.gitignore")
+        Utils.File.touch(StudyProjectEnv.data_path + f"/{Git.gitignore}")
+        os.mkdir(
+            StudyProjectEnv.path + f"/{StudyProjectEnv.study_project_projects}"
+        )
+        os.mkdir(
+            StudyProjectEnv.path + f"/{StudyProjectEnv.study_project_config}"
+        )
+        Utils.File.touch(
+            StudyProjectEnv.path
+            + f"/{StudyProjectEnv.study_project_projects}"
+            + f"/{Git.gitignore}"
+        )
+        os.mkdir(
+            StudyProjectEnv.path + f"/{StudyProjectEnv.study_project_studies}"
+        )
+        Utils.File.touch(
+            StudyProjectEnv.path
+            + f"/{StudyProjectEnv.study_project_studies}"
+            + f"/{Git.gitignore}"
+        )
+        os.mkdir(
+            StudyProjectEnv.path + f"/{StudyProjectEnv.study_project_data}"
+        )
+        Utils.File.touch(
+            StudyProjectEnv.path
+            + f"/{StudyProjectEnv.study_project_data}"
+            + f"/{Git.gitignore}"
+        )
+        Utils.File.write(
+            f"\n{StudyProjectEnv.study_project_config}\n"
+            + StudyProjectEnv.gitIgnore,
+            f"{StudyProjectEnv.path}/{Git.gitignore}",
+        )
+
+        StudyProjectEnv.addPostCheckoutHook()
         print("\tstudy_project initialized")
         StudyProjectEnv.installed = True
         Git.add(
@@ -691,33 +949,43 @@ class StudyProjectEnv:
                 StudyProjectEnv.path,
                 StudyProjectEnv.path + "/",
                 StudyProjectEnv.data_path,
-                StudyProjectEnv.data_path + "/",
+                # StudyProjectEnv.data_path + "/",
+                Git.gitignore,
             ]
         )
         StudyProjectEnv.commit("study_project installed")
 
     @staticmethod
-    def addBranch(name):
+    def addBranch(name, *args, **xargs):
         brName = f"{StudyProjectEnv.step}-{name}"
-        Git.addBranch(brName)
+        Git.addBranch(brName, *args, **xargs)
         StudyProjectEnv.step += 1
         return brName
 
     @staticmethod
     def getProjectVersions(id):
-        projName = StudyProjectEnv.getProjectBranchName(id)
+        projName = StudyProjectEnv.getProjectBranchName(id, no_prefix=True)
         # StudyProjectEnv.getConfigProject(id)
-        if Utils.File.exist(f"{StudyProjectEnv.path}/.config/{projName}"):
-            return Utils.File.read(f"{StudyProjectEnv.path}/.config/{projName}")
+        if Utils.File.exist(
+            f"{StudyProjectEnv.path}/{StudyProjectEnv.study_project_config}/{projName}"
+        ):
+            return Utils.File.read(
+                f"{StudyProjectEnv.path}/{StudyProjectEnv.study_project_config}/{projName}"
+            )
         return ""
 
     @staticmethod
     def saveProjectVersions(id, versions):
-        projName = StudyProjectEnv.getProjectBranchName(id)
-        if not Utils.Dir.exist(f"{StudyProjectEnv.path}/.config"):
-            Utils.Dir.mk(f"{StudyProjectEnv.path}/.config")
+        projName = StudyProjectEnv.getProjectBranchName(id, no_prefix=True)
+        if not Utils.Dir.exist(
+            f"{StudyProjectEnv.path}/{StudyProjectEnv.study_project_config}"
+        ):
+            Utils.Dir.mk(
+                f"{StudyProjectEnv.path}/{StudyProjectEnv.study_project_config}"
+            )
         Utils.File.write(
-            versions, filename=f"{StudyProjectEnv.path}/.config/{projName}"
+            versions,
+            filename=f"{StudyProjectEnv.path}/{StudyProjectEnv.study_project_config}/{projName}",
         )
         return versions
 
@@ -730,6 +998,11 @@ class StudyProjectEnv:
     def getVersion(hash, id):
         versionsDict = StudyProjectEnv.getVersionsDict(id)
         return versionsDict[hash] if hash in versionsDict else None
+
+    @staticmethod
+    def getHashFromVersion(version, id):
+        versionsDict = StudyProjectEnv.getVersionsDict(id)
+        return versionsDict[version] if version in versionsDict else None
 
     @staticmethod
     def saveVersions(id, versions):
@@ -756,8 +1029,10 @@ class StudyProjectEnv:
     def addProjectBranch(id):
         nb = StudyProjectEnv.getVersionNumber(id)
         brName = StudyProjectEnv.getProjectBranchName(id, nb)
-        Git.addBranch(brName)
-        return (brName, nb)
+        Git.addBranch(brName, checkout=False)
+        tempCommit = Git.goToBranch(brName, no_reset=False)
+        StudyProjectEnv.addGitIgnoreBranch(brName)
+        return (brName, nb, tempCommit)
 
     @staticmethod
     def check_all_installed():
@@ -775,12 +1050,13 @@ class StudyProjectEnv:
                 print(
                     "study_project : git/Dvc/study_project are already installed, we can't for the moment install only on off them"
                 )
+                # StudyProjectEnv.check_config()
                 return False
             install = True
             print("Set Up Study Project ....")
             if not Git.check_installed():
                 # StudyProjectEnv.check_init()
-                Git.install()
+                Git.install(name=StudyProjectEnv.master)
                 StudyProjectEnv.addBranch(f"set-up")
                 # Git.checkout("master")
                 # Git.merge("install-git")
@@ -791,11 +1067,16 @@ class StudyProjectEnv:
                 # StudyProjectEnv.addBranch(f"install-study-project")
                 StudyProjectEnv.install()
                 currBranche = Git.getBranch()
-                Git.goToBranch("master", no_hooks=True)
+                # print("isntall").
+                Git.goToBranch(StudyProjectEnv.master, no_hooks=True)
                 StudyProjectEnv.merge(currBranche, message="set-up")
                 Git.deleteBranch(currBranche)
+
+                # add nb branch
+                Git.addBranch(StudyProjectEnv.nb)
             print("Study Project OK")
-            return True
+            # return True
+        StudyProjectEnv.check_config()
         return True
 
     @staticmethod
@@ -823,15 +1104,23 @@ class StudyProjectEnv:
 
     @staticmethod
     def check_config():
-        if not Utils.Dir.exist(f"{StudyProjectEnv.path}/.config"):
-            Utils.Dir.mk(StudyProjectEnv.path + "/.config")
-            Utils.File.write(".config", f"{StudyProjectEnv.path}/.gitignore")
+        if not Utils.Dir.exist(
+            f"{StudyProjectEnv.path}/{StudyProjectEnv.study_project_config}"
+        ):
+            Utils.Dir.mk(
+                StudyProjectEnv.path
+                + f"/{StudyProjectEnv.study_project_config}"
+            )
+            Utils.File.write(
+                f"{StudyProjectEnv.study_project_config}",
+                f"{StudyProjectEnv.path}/{Git.gitignore}",
+            )
             StudyProjectEnv.find_projects()
         # print("OK")
 
     @staticmethod
     def check_init():
-        rep = Utils.Shell.command("git branch")
+        rep = Git.commandGit("branch")
         if rep.error:
             raise Exception(rep.error)
         if len(rep.output) == 0:
@@ -840,8 +1129,8 @@ class StudyProjectEnv:
             Git.commit()
 
     @staticmethod
-    def goToBranch(name):
-        Git.goToBranch(name)
+    def goToBranch(*args, **xargs):
+        return Git.goToBranch(*args, **xargs)
 
     @staticmethod
     def commit(message, prefixe=None):
@@ -865,20 +1154,6 @@ class StudyProjectEnv:
         return (False, md5OfData)
 
     @staticmethod
-    def saveData(data, dataHash):
-        projPath = StudyProjectEnv.path + "/data"
-        if not Utils.File.exist(projPath + "/" + dataHash):
-            StudyProjectEnv.addData(data.train, data.fileName + "_train")
-            StudyProjectEnv.addData(data.test, data.fileName + "_test")
-            fileStr = Data.get_file_export(
-                data,
-                lambda name, data_: StudyProjectEnv.addData(
-                    data_, data.fileName + f"_data_{name}"
-                ),
-            )
-            Utils.File.write(fileStr, projPath + "/" + dataHash)
-
-    @staticmethod
     def getFileData(dataParsed, data_name, id):
         fileName = Git.toBrancheName(id, sep="_")
         path = f"{StudyProjectEnv.data_path}/{fileName}_{data_name}.csv"
@@ -893,33 +1168,12 @@ class StudyProjectEnv:
                 return Utils.Df.from_csv_string(fileData)
 
     @staticmethod
-    def getData(dataHash):
-        projPath = StudyProjectEnv.path + "/data"
-        if Utils.File.exist(projPath + "/" + dataHash):
-            dataString = Utils.File.read(projPath + "/" + dataHash)
-            dataParsed2 = Utils.String.parse(
-                dataString, sep=":"
-            )  # {i: Utils.String.parse(dataString,sep=":") for i in ["id","comment","train","test","target"]}
-            data = {}
-            dataParsed = {}
-            for k, v in dataParsed2.items():
-                if Utils.RE.match(k, "^data."):
-                    data[k[len("data.") :]] = StudyProjectEnv.getFileData(
-                        {"data_" + k[len("data.") :]: v},
-                        "data_" + k[len("data.") :],
-                        dataParsed["id"],
-                    )
-                else:
-                    dataParsed[k] = v
-            dataParsed["data"] = data
-            dataFiles = {
-                i: StudyProjectEnv.getFileData(dataParsed, i, dataParsed["id"])
-                for i in ["train", "test"]
-            }
-            dataReady = {**dataParsed, **dataFiles}
-            return Data().setData(**dataReady)
-        print("error : {projPath + " / " + dataHash}")
-        return Data()
+    def getData(*args, **xargs):
+        return Data.getData(*args, **xargs)
+
+    @staticmethod
+    def saveData(*args, **xargs):
+        Data.saveData(*args, **xargs)
 
     @staticmethod
     def forgotData(dataHash):
@@ -928,7 +1182,9 @@ class StudyProjectEnv:
     @staticmethod
     def getProjPath(id):
         return (
-            StudyProjectEnv.path + "/projects/" + Git.toBrancheName(id, sep="_")
+            StudyProjectEnv.path
+            + f"/{StudyProjectEnv.study_project_projects}/"
+            + Git.toBrancheName(id, sep="_")
         )
 
     @staticmethod
@@ -957,13 +1213,17 @@ class StudyProjectEnv:
         dataHashDico = dataHash
 
         dataHashStr = "\n".join(dataHash.keys())
-        if not Utils.File.exist(f"{projPath}/data"):
+        if not Utils.File.exist(f"{projPath}/{StudyProjectEnv.projData}"):
             lastDataHashStr = ""
         else:
-            lastDataHashStr = Utils.File.read(f"{projPath}/data")
+            lastDataHashStr = Utils.File.read(
+                f"{projPath}/{StudyProjectEnv.projData}"
+            )
 
         if lastDataHashStr != dataHashStr:
-            Utils.File.write(dataHashStr, filename=f"{projPath}/data")
+            Utils.File.write(
+                dataHashStr, filename=f"{projPath}/{StudyProjectEnv.projData}"
+            )
             lastDataHash = set(lastDataHashStr.split("\n"))
             dataHash = set(dataHash.keys())
             newData = dataHash - lastDataHash
@@ -973,29 +1233,61 @@ class StudyProjectEnv:
             for i in pastData:
                 StudyProjectEnv.forgotData(i)
 
-        setUpMd5Proj = Utils.Hash.function_md5(project.setUp)
-        if Utils.File.exist(f"{projPath}/setUp"):
-            setUpMd5 = Utils.File.read(f"{projPath}/setUp")
-            if setUpMd5Proj == setUpMd5:
-                # upVersion("", setUpMd5Proj)
-                return
-        Utils.File.write(setUpMd5Proj, filename=f"{projPath}/setUp")
+        if project.setUp:
+            setUpMd5Proj = Utils.Hash.function_md5(project.setUp)
+            if Utils.File.exist(f"{projPath}/{StudyProjectEnv.projSetUp}"):
+                setUpMd5 = Utils.File.read(
+                    f"{projPath}/{StudyProjectEnv.projSetUp}"
+                )
+                if setUpMd5Proj == setUpMd5:
+                    # upVersion("", setUpMd5Proj)
+                    return
+            Utils.File.write(
+                setUpMd5Proj, filename=f"{projPath}/{StudyProjectEnv.projSetUp}"
+            )
 
         addCommit()
 
         upVersion("", setUpMd5Proj)
 
     @staticmethod
-    def getProjectBranchName(id, v=None):
+    def getProjectBranchName(id, v=None, no_prefix=False):
         versions = "" if v is None else f"-v{v}"
-        return f"{StudyProjectEnv.project_prefixe}-{Git.toBrancheName(id)}{versions}"
+        prefix = f"{StudyProjectEnv.prefix_branch}/" if not no_prefix else ""
+        return f"{prefix}{StudyProjectEnv.project_prefixe}-{Git.toBrancheName(id)}{versions}"
 
     @staticmethod
-    def getProjectBranch(id, setUp):
-        branchName = StudyProjectEnv.getProjectBranchName(id)
+    def getProjectBranch(id, setUp=None, version=None):
+        import warnings
 
-        setUpMd5Proj = Utils.Hash.function_md5(setUp)
-        projHash = Utils.Hash.md5(f"\n{setUpMd5Proj}")
+        def getProjHash():
+            setUpMd5Proj = Utils.Hash.function_md5(setUp)
+            return Utils.Hash.md5(f"\n{setUpMd5Proj}")
+
+        branchName = StudyProjectEnv.getProjectBranchName(id, v=version)
+        if setUp is None and version is None:
+            vNum = StudyProjectEnv.getVersionNumber(id)
+            if vNum == 0:
+                return None
+            version = vNum - 1
+        branchName = StudyProjectEnv.getProjectBranchName(id, v=version)
+
+        if version is not None:
+            if Git.checkBranch(branchName):
+                if setUp is None:
+                    return branchName
+                else:
+                    projHash = getProjHash()
+                    hashInConfig = StudyProjectEnv.getHashFromVersion(
+                        version, id
+                    )
+                    if projHash != hashInConfig:
+                        warnings.warn(
+                            "/!\\ setUp different de celui en memoire : Vous devez créer une nouvelle version du project"
+                        )
+                        return None
+                    return branchName
+        projHash = getProjHash()
         v = StudyProjectEnv.getVersion(projHash, id)
         return branchName + f"-v{v}" if v is not None else None
         # studiesHash=[study.get_hash() for study in project.studies.values()]
@@ -1011,20 +1303,29 @@ class StudyProjectEnv:
         projStr = ""
         if Utils.Dir.exist(projPath):
             proj = StudyProject(id)
-
-            if Utils.File.exist(f"{projPath}/setUp"):
-                setUpMd5Proj = Utils.Hash.function_md5(setUp)
-                setUpMd5 = Utils.File.read(f"{projPath}/setUp")
-                if setUpMd5Proj == setUpMd5:
-                    proj.setUp = setUp
+            setUpMd5Proj = None
+            if Utils.File.exist(f"{projPath}/{StudyProjectEnv.projSetUp}"):
+                setUpMd5 = Utils.File.read(
+                    f"{projPath}/{StudyProjectEnv.projSetUp}"
+                )
+                if setUp is None:
+                    setUpMd5Proj = setUpMd5
+                    # TODO: retrieve setUp source code
+                    proj.setUp = None
                 else:
-                    proj.setUp = "outdated"
-                    print("SetUp is not the saved")
-                    return proj
+                    setUpMd5Proj = Utils.Hash.function_md5(setUp)
+                    if setUpMd5Proj == setUpMd5:
+                        proj.setUp = setUp
+                    else:
+                        proj.setUp = "outdated"
+                        print("SetUp is not the saved")
+                        return proj
                 # projStr+="\n"+setUpMd5
 
-            if Utils.File.exist(f"{projPath}/data"):
-                DataHash = Utils.File.read(f"{projPath}/data")
+            if Utils.File.exist(f"{projPath}/{StudyProjectEnv.projData}"):
+                DataHash = Utils.File.read(
+                    f"{projPath}/{StudyProjectEnv.projData}"
+                )
                 data = {
                     i.id: i
                     for i in [
@@ -1032,7 +1333,7 @@ class StudyProjectEnv:
                         for Datahashi in DataHash.split("\n")
                     ]
                 }
-                proj.data = data
+                proj.data = Struct(**data)
             projHash = Utils.Hash.md5(f"\n{setUpMd5Proj}")
             proj.v = StudyProjectEnv.getVersion(projHash, proj.id)
             return proj
@@ -1040,6 +1341,65 @@ class StudyProjectEnv:
 
 
 class Data:
+    @staticmethod
+    def getTrainName(fileName):
+        return f"{fileName}_train"
+
+    @staticmethod
+    def getTestName(fileName):
+        return f"{fileName}_test"
+
+    @staticmethod
+    def getDataName(fileName, k):
+        return f"{fileName}_data_{k}"
+
+    @staticmethod
+    def getData(dataHash):
+        projPath = (
+            StudyProjectEnv.path + f"/{StudyProjectEnv.study_project_data}"
+        )
+        if Utils.File.exist(projPath + "/" + dataHash):
+            dataString = Utils.File.read(projPath + "/" + dataHash)
+            dataParsed2 = Utils.String.parse(
+                dataString, sep=":"
+            )  # {i: Utils.String.parse(dataString,sep=":") for i in ["id","comment","train","test","target"]}
+            data = {}
+            dataParsed = {}
+            for k, v in dataParsed2.items():
+                if Utils.RE.match(k, "^data."):
+                    data[k[len("data.") :]] = StudyProjectEnv.getFileData(
+                        {"data_" + k[len("data.") :]: v},
+                        "data_" + k[len("data.") :],
+                        dataParsed["id"],
+                    )
+                else:
+                    dataParsed[k] = v
+            dataParsed["data"] = data
+            dataFiles = {
+                i: StudyProjectEnv.getFileData(dataParsed, i, dataParsed["id"])
+                for i in ["train", "test"]
+            }
+            dataReady = {**dataParsed, **dataFiles}
+            return Data().setData(**dataReady)
+        print(f"error : {projPath}   /   {dataHash}")
+        return Data()
+
+    @staticmethod
+    def saveData(data, dataHash):
+        projPath = StudyProjectEnv.path + "/data"
+        if not Utils.File.exist(projPath + "/" + dataHash):
+            StudyProjectEnv.addData(
+                data.train, Data.getTrainName(data.fileName)
+            )
+            StudyProjectEnv.addData(data.test, Data.getTestName(data.fileName))
+            fileStr = Data.get_file_export(
+                data,
+                lambda name, data_: StudyProjectEnv.addData(
+                    data_, Data.getDataName(data.fileName, name)
+                ),
+            )
+            Utils.File.write(fileStr, projPath + "/" + dataHash)
+
     def setData(self, /, id, train, test, target, comment="", data={}):
         # check is pandas df, series
         self.id = id
@@ -1054,19 +1414,19 @@ class Data:
         self.fileName = Git.toBrancheName(id, sep="_")
         fileName = self.fileName
         (new, md5_train) = StudyProjectEnv.addData(
-            self.train, f"{fileName}_train"
+            self.train, Data.getTrainName(fileName)
         )
         # (new2, md5_target) = StudyProjectEnv.addData(
         #     self.target, f"{fileName}_target"
         # )
         (new2, md5_test) = StudyProjectEnv.addData(
-            self.test, f"{fileName}_test"
+            self.test, Data.getTestName(fileName)
         )
         new3 = False
         data_md5 = {}
         for k, v in self.data.items():
             (new_, md5_data_) = StudyProjectEnv.addData(
-                v, f"{fileName}_data_{k}"
+                v, Data.getDataName(fileName, k)
             )
             data_md5[k] = md5_data_
             new3 = new3 or new_
@@ -1105,6 +1465,11 @@ class Study:
 
 
 class StudyProject:
+    env = StudyProjectEnv
+    dvc = Dvc
+    git = Git
+    utils = Utils
+
     def __init__(self, id, saveProject=True):
         self.data = {}
         self.studies = {}
@@ -1119,47 +1484,119 @@ class StudyProject:
         dataObj = Data()
         dataObj.setData(id, train, test, target, comment, data)
         self.data[id] = dataObj
+        self.data = Struct(**self.data)
         print(f"\tData '{id}' : ok ")
 
         if self.saveProject:
             StudyProjectEnv.saveProject(self)
 
     @classmethod
-    def getOrCreate(self, id, setUp, recreate=False):
+    def getOrCreate(self, id, setUp=None, version=None, recreate=False):
         if not StudyProjectEnv.check_all_installed():
             return
-        StudyProjectEnv.check_config()
+
+        # GOTO BRANCH MASTER:
+        tempCommitBranchCurr = None
+        branchCurr = Git.getBranch()
+        if branchCurr != StudyProjectEnv.master:
+            # TODO: check if the branche is study-project and force to be in master if it
+            # print(f"getOrCreate {branchCurr}")
+            tempCommitBranchCurr = Git.goToBranch(
+                StudyProjectEnv.master, no_reset=False
+            )
+            if tempCommitBranchCurr:
+                warnings.warn(
+                    f"Ton travail a été commit dans un commit temporaire sur la branche {branchCurr}"
+                )
+            if Utils.RE.match(
+                pattern=f"^{StudyProjectEnv.prefix_branch}/", text=branchCurr
+            ):
+                branchCurr = StudyProjectEnv.nb
+                tempCommitBranchCurr = False
+        else:
+            branchCurr = StudyProjectEnv.nb
+            tempCommitBranchCurr = False
+
+        def comeBackMaster(tempCommit):
+            # print("comeBackMaster")
+            tempCommitToMaster = Git.goToBranch(
+                StudyProjectEnv.master, no_reset=False
+            )
+            if tempCommitToMaster:
+                warnings.warn(
+                    f"Wtf pb il y a eu un commit temporaire : '{Git.getBranch()}' [{tempCommit}] -> '{StudyProjectEnv.master}'? "
+                )
+                sys.exit()
+            if tempCommit:
+                Git.backCommit()
+
+        def comeBackBranchCurr():
+            # print("comeBackBranchCurr", Git.getBranch(),
+            # branchCur:r, tempCommitBranchCurr)
+            if Git.getBranch() == branchCurr:
+                return
+            tempCommitToBranchCurr = Git.goToBranch(branchCurr, no_reset=False)
+            if tempCommitToBranchCurr:
+                warnings.warn(
+                    f"Wtf pb il y a eu un commit temporaire : '{Git.getBranch()}' -> '{branchCurr}'? "
+                )
+                sys.exit()
+            if tempCommitBranchCurr:
+                Git.backCommit()
+                # tempCommitBranchCurr=False
 
         def create_project():
-            Git.goToBranch("master")
-            (brName, v) = StudyProjectEnv.addProjectBranch(id)
+            if setUp is None:
+                print("setUp must me set when create project")
+                comeBackBranchCurr()
+                return
+            if Git.getBranch() != StudyProjectEnv.master:
+                warnings.warn(f"Wtf tu fou quoi ici : '{branchCurr}' ? ")
+                sys.exit()
+                # Git.goToBranch(StudyProjectEnv.master)
+            (brName, v, tempCommit) = StudyProjectEnv.addProjectBranch(id)
             df = " " * len(f"Project '{id}' ")
             print(f"Project '{id}' (v{v}) : creating...")
             proj = self(id)
             proj.setUp = setUp
             proj.v = v
-            print(df + ": setUp....")
-            setUp(proj)
+            if setUp:
+                print(df + ": setUp....")
+                setUp(proj)
             print(df + ": ok")
             StudyProjectEnv.saveProject(proj)
+            # print(tempCommit)
+            comeBackMaster(tempCommit)
+            comeBackBranchCurr()
             return proj
 
         # "project-"+Git.toBrancheName(id)
-        projectBranch = StudyProjectEnv.getProjectBranch(id, setUp)
+        projectBranch = StudyProjectEnv.getProjectBranch(id, setUp, version)
         # print("projectBranch",projectBranch)
         if projectBranch is not None and Git.checkBranch(projectBranch):
-            Git.goToBranch(projectBranch)
+            tempCommit = Git.goToBranch(projectBranch, no_reset=False)
             project = StudyProjectEnv.getProject(id, setUp)
             # setUpMd5=Utils.Hash.function_md5(setUp)
-            if project.setUp == "outdated":
+            if project is not None and project.setUp == "outdated":
+                if tempCommitMaster:
+                    if len(Git.getModified()) > 0:
+                        warnings.warn(
+                            "project {id} outdated(setUp) in branch {projectBranch} but there are Modifed files"
+                        )
+                        sys.exit()
+                    comeBackMaster(tempCommit)
                 return create_project()
             if project is not None:
+                comeBackMaster(tempCommit)
+                comeBackBranchCurr()
                 print(f"Project '{id}' (v{project.v}) : loaded")
                 return project
+            comeBackMaster(tempCommit)
+            comeBackBranchCurr()
             print(f"Project {id} not load !!!")
             return
             # load projectloaded")
-            return self.proj[id]
+            # return self.proj[id]
         return create_project()
 
     def getOrCreateStudy(self, id, setUp=None, data=None):
